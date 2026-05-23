@@ -1,0 +1,16 @@
+librosa
+soundfile
+numpy
+requests
+pybase64
+omegaconf
+openai-whisper
+accelerate
+transformers
+autoawq
+sentence-transformers
+bitsandbytes
+gptqmodel
+audio-separator[gpu]
+wtpsplit[onnx-gpu]
+nemo_toolkit[asr]
