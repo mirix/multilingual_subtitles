@@ -1,6 +1,6 @@
 # 🎤 Multilingual Karaoke Subtitle Generator
 
-This pipeline generates **word-level karaoke-style subtitles** for videos along with translations into your favourite language.  
+This pipeline generates **word-level karaoke-style subtitles** for videos along with translations into your favourite languages.  
 It utilizes an "Air-Gapped" architecture, separating the heavy acoustic transcription engine (NVIDIA NeMo Parakeet) from the translation engine (SGLang / Tencent Hy-MT2) to prevent dependency conflicts and optimize VRAM allocation.
 
 ---
@@ -20,14 +20,20 @@ The translation engine supports all 25 source languages above, plus:
 ## ⚙️ Installation
 
 ### 1. Global Dependencies (Linux)
+
+```
 sudo pacman -Syu ffmpeg libass
+```
 
 ### 2. The Main Pipeline Environment (NeMo / Audio Processing)
 This environment handles vocal isolation, transcription, and subtitle compilation.
+
+```
 python3 -m venv venv_main
 source venv_main/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
+```
 
 ---
 
@@ -37,10 +43,15 @@ pip install -r requirements.txt
 ### Step 2: Execute the Master Script (Terminal B)
 Open a new terminal, activate your `venv_main` environment, and run the karaoke builder.
 
+```
 source venv_main/bin/activate
+```
 
 # Basic Usage (Auto-detects language, translates to English)
+
+```
 python transcription.py input_track.mp4
+```
 
 ### Optional Flags
 
