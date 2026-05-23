@@ -36,6 +36,7 @@ python3 -m venv venv_main
 source venv_main/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
+CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
 ```
 
 ---
