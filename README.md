@@ -1,6 +1,6 @@
 # 🎤 Multilingual Karaoke Subtitle Generator
 
-This pipeline generates **word-level karaoke-style subtitles** for videos.  
+This pipeline generates **word-level karaoke-style subtitles** for videos along with translations into your favourite language.  
 It utilizes an "Air-Gapped" architecture, separating the heavy acoustic transcription engine (NVIDIA NeMo Parakeet) from the translation engine (SGLang / Tencent Hy-MT2) to prevent dependency conflicts and optimize VRAM allocation.
 
 ---
@@ -18,8 +18,6 @@ The translation engine supports all 25 source languages above, plus:
 ---
 
 ## ⚙️ Installation
-
-Because of strict PyTorch and CUDA dependency conflicts between NVIDIA NeMo and SGLang, this project requires **two separate virtual environments**.
 
 ### 1. Global Dependencies (Linux)
 sudo pacman -Syu ffmpeg libass
