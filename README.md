@@ -51,6 +51,12 @@ Open a new terminal, activate your `venv_main` environment, and run the karaoke 
 source venv_main/bin/activate
 ```
 
+# Display help
+
+```
+python transcription.py -h
+```
+
 # Basic Usage (Auto-detects language, translates to English)
 
 ```
