@@ -1,7 +1,12 @@
 # 🎤 Multilingual Karaoke Subtitle Generator
 
-This pipeline generates **word-level karaoke-style subtitles** for videos along with translations into your favourite languages.  
-It utilizes an "Air-Gapped" architecture, separating the heavy acoustic transcription engine (NVIDIA NeMo Parakeet) from the translation engine (SGLang / Tencent Hy-MT2) to prevent dependency conflicts and optimize VRAM allocation.
+This pipeline generates **word-level karaoke-style subtitles** for videos along with translations into your favourite languages. 
+
+It utilizes an "Air-Gapped" architecture, separating the heavy acoustic transcription engine (NVIDIA NeMo Parakeet) from the translation engine (Tencent Hy-MT2) to prevent dependency conflicts and optimize VRAM allocation.
+
+If you choose a smaller translation model (1.8B vs the current 8B) and deactivate refinement you can run this on a toaster.
+
+The Gemma version is untested and requires more memory. Qwen is the default verion.
 
 ---
 
@@ -56,10 +61,16 @@ python transcription.py input_track.mp4
 ### Optional Flags
 
 **Set Target (Translation) Language:**
+
+```
 python transcription.py input_track.mp4 --target-lang pt
+```
 
 **Set Source (Acoustic) Language (Overrides Auto-Detect):**
+
+```
 python transcription.py input_track.mp4 --source-lang de
+```
 
 ---
 
