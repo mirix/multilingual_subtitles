@@ -92,20 +92,16 @@ INPUT_LANGUAGES = {
 }
 
 OUTPUT_LANGUAGES = {
-    "en": "English", "es": "Spanish", "fr": "French", "de": "German",
-    "it": "Italian", "pt": "Portuguese", "ru": "Russian", "zh": "Chinese",
-    "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi",
-    "bn": "Bengali", "id": "Indonesian", "tr": "Turkish", "vi": "Vietnamese",
-    "pl": "Polish", "nl": "Dutch", "th": "Thai", "cs": "Czech",
-    "sv": "Swedish", "ro": "Romanian", "hu": "Hungarian", "da": "Danish",
-    "fi": "Finnish", "el": "Greek", "uk": "Ukrainian", "bg": "Bulgarian",
-    "sk": "Slovak", "hr": "Croatian", "lt": "Lithuanian", "sl": "Slovenian",
-    "et": "Estonian", "lv": "Latvian", "sr": "Serbian", "ca": "Catalan",
-    "ms": "Malay", "tl": "Tagalog", "ta": "Tamil", "te": "Telugu",
-    "ml": "Malayalam", "mr": "Marathi", "ur": "Urdu", "fa": "Persian",
-    "he": "Hebrew", "sw": "Swahili", "am": "Amharic", "yo": "Yoruba",
-    "zu": "Zulu", "af": "Afrikaans", "is": "Icelandic", "ka": "Georgian",
-    "hy": "Armenian", "km": "Khmer", "my": "Burmese", "ne": "Nepali",
+    "zh": "Chinese", "en": "English", "fr": "French", "pt": "Portuguese",
+    "es": "Spanish", "ja": "Japanese", "tr": "Turkish", "ru": "Russian",
+    "ar": "Arabic", "ko": "Korean", "th": "Thai", "it": "Italian",
+    "de": "German", "vi": "Vietnamese", "ms": "Malay", "id": "Indonesian",
+    "tl": "Filipino", "hi": "Hindi", "zh-hant": "Traditional Chinese",
+    "pl": "Polish", "cs": "Czech", "nl": "Dutch", "km": "Khmer",
+    "my": "Burmese", "fa": "Persian", "gu": "Gujarati", "ur": "Urdu",
+    "te": "Telugu", "mr": "Marathi", "he": "Hebrew", "bn": "Bengali",
+    "ta": "Tamil", "uk": "Ukrainian", "bo": "Tibetan", "kk": "Kazakh",
+    "mn": "Mongolian", "ug": "Uyghur", "yue": "Cantonese",
 }
 
 # =====================================================================
