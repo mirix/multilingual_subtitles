@@ -1,16 +1,9 @@
 librosa
 soundfile
 numpy
-requests
-pybase64
 omegaconf
-openai-whisper
 accelerate
-transformers
-autoawq
-sentence-transformers
-bitsandbytes
-gptqmodel
+transformers>=4.38.0
 audio-separator[gpu]
 wtpsplit[onnx-gpu]
 nemo_toolkit[asr]
