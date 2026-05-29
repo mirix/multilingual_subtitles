@@ -64,14 +64,6 @@ pip install -r requirements.txt
 
 ## 🚀 Usage
 
-
-### Step 2: Execute the Master Script (Terminal B)
-Open a new terminal, activate your `venv_main` environment, and run the karaoke builder.
-
-```
-source venv_main/bin/activate
-```
-
 # Display help
 
 ```
