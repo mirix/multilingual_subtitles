@@ -55,6 +55,16 @@ MODEL_BS = "bs_roformer_vocals_resurrection_unwa.ckpt"
 MODEL_MEL = "melband_roformer_big_beta5e.ckpt"
 MODEL_DEREVERB = "dereverb-echo_mel_band_roformer_sdr_13.4843_v2.ckpt"
 
+# Persistent, shared model cache. This must NOT live inside the per-run work
+# directory (which is deleted at the end of every run); otherwise audio-separator
+# re-downloads every model on each invocation and overwrites any locally swapped
+# checkpoint. Override with --model-cache-dir or the AUDIO_SEPARATOR_MODEL_DIR
+# environment variable.
+DEFAULT_MODEL_CACHE_DIR = os.environ.get(
+    "AUDIO_SEPARATOR_MODEL_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "audio-separator-models"),
+)
+
 OMITTED = "[OMITTED_BY_LLM]"
 
 # =====================================================================
@@ -219,19 +229,25 @@ def run_isolation_inference(
     output_dir: str,
     primary_stem: str = "Vocals",
     secondary_stem: str = "Instrumental",
+    model_cache_dir: str = DEFAULT_MODEL_CACHE_DIR,
 ) -> str:
     """Run audio-separator with a model and return the primary-stem path.
 
     Only the primary stem (the isolated vocals, used downstream for ASR) is
     needed; the secondary stem is left in ``output_dir`` and cleaned up with the
     temp directory.
+
+    ``model_cache_dir`` is the persistent model store and is intentionally kept
+    separate from ``output_dir`` (the ephemeral per-run work dir) so models are
+    downloaded once and any locally swapped checkpoint survives across runs.
     """
     logger.info("Running audio-separator with model: %s", model_filename)
     from audio_separator.separator import Separator
 
+    os.makedirs(model_cache_dir, exist_ok=True)
     separator = Separator(
         log_level=logging.WARNING,
-        model_file_dir=os.path.join(output_dir, "models_cache"),
+        model_file_dir=model_cache_dir,
         output_dir=output_dir,
         output_format="WAV",
         normalization_threshold=0.9,
@@ -823,6 +839,7 @@ def run_pipeline(
     translation_model: Optional[str] = None,
     skip_correction: bool = False,
     output_dir: Optional[str] = None,
+    model_cache_dir: Optional[str] = None,
 ) -> str:
     """Run the end-to-end subtitle pipeline and return the output video path."""
     check_external_tools()
@@ -836,6 +853,10 @@ def run_pipeline(
 
     out_dir = os.path.abspath(output_dir) if output_dir else os.getcwd()
     os.makedirs(out_dir, exist_ok=True)
+
+    cache_dir = os.path.abspath(model_cache_dir or DEFAULT_MODEL_CACHE_DIR)
+    os.makedirs(cache_dir, exist_ok=True)
+    logger.info("Using persistent model cache: %s", cache_dir)
 
     base_dir = os.path.abspath(
         os.path.join(tempfile.gettempdir(), f"langstudy_{uuid.uuid4().hex[:8]}")
@@ -855,11 +876,16 @@ def run_pipeline(
     try:
         # ---- PHASE 1: AUDIO ISOLATION (preprocessing for clean ASR only) ----
         extract_audio_from_video(clean_video_path, extracted)
-        v_bs = run_isolation_inference(extracted, MODEL_BS, "bs", base_dir)
-        v_mel = run_isolation_inference(extracted, MODEL_MEL, "mel", base_dir)
+        v_bs = run_isolation_inference(
+            extracted, MODEL_BS, "bs", base_dir, model_cache_dir=cache_dir
+        )
+        v_mel = run_isolation_inference(
+            extracted, MODEL_MEL, "mel", base_dir, model_cache_dir=cache_dir
+        )
         ensemble_vocals_stft(v_bs, v_mel, v_stft)
         d_stem = run_isolation_inference(
-            v_stft, MODEL_DEREVERB, "dereverb", base_dir, "dry", "no dry"
+            v_stft, MODEL_DEREVERB, "dereverb", base_dir, "dry", "no dry",
+            model_cache_dir=cache_dir,
         )
         os.replace(d_stem, v_deecho)
 
@@ -975,7 +1001,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="HuggingFace model ID for multimodal ASR refinement. Use 'none' to skip.",
     )
     parser.add_argument(
-        "-m", "--translation-model", default="google/translategemma-12b-it",
+        "-m", "--translation-model", default="tencent/Hy-MT2-7B",
         help="HuggingFace model ID for translation. Use 'none' to skip.",
     )
     parser.add_argument(
@@ -985,6 +1011,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-o", "--output-dir", default=None,
         help="Directory for the final video (default: current working directory).",
+    )
+    parser.add_argument(
+        "--model-cache-dir", default=None,
+        help="Persistent directory for downloaded separation models "
+             f"(default: {DEFAULT_MODEL_CACHE_DIR}). Keep this stable to avoid "
+             "re-downloading models and to preserve any locally swapped checkpoint.",
     )
     return parser
 
@@ -1000,6 +1032,7 @@ def main(argv: Optional[list] = None) -> int:
             args.translation_model,
             args.skip_correction,
             output_dir=args.output_dir,
+            model_cache_dir=args.model_cache_dir,
         )
     except KeyboardInterrupt:
         logger.warning("Interrupted by user.")

@@ -2,8 +2,8 @@ librosa
 soundfile
 numpy
 omegaconf
-accelerate
-transformers>=4.38.0
 audio-separator[gpu]
 wtpsplit[onnx-gpu]
 nemo_toolkit[asr]
+accelerate
+transformers
