@@ -447,7 +447,7 @@ def _make_phrase(phrase_words: list) -> dict:
 # =====================================================================
 # PHASE 2.5: MULTIMODAL AUDIO-TEXT REFINER
 # =====================================================================
-def execute_omni_refinement(audio_path: str, phrases: list, model_id: str) -> list:
+def execute_omni_refinement(audio_path: str, phrases: list, model_id: str, src_lang_name: str = "the audio's language") -> list:
     """Use an omni-modal LLM to refine ASR text against the actual audio."""
     logger.info("Loading omni refiner (%s) via Transformers...", model_id)
     from transformers import AutoModelForCausalLM, AutoProcessor
@@ -470,11 +470,19 @@ def execute_omni_refinement(audio_path: str, phrases: list, model_id: str) -> li
             end_time = min(duration, phrase["end"] + REFINER_CONTEXT_PAD)
             chunk = y[int(start_time * sr): int(end_time * sr)]
 
+            # Injecting the target language directly into the persona and rules
             prompt = (
-                "You are an expert audio editor and linguist. Listen to the provided "
-                "audio chunk and read the drafted ASR transcription below. Correct the "
-                "transcription, fixing any phonetic hallucinations or grammatical "
-                f"errors.\n\nDraft: {phrase['text']}\n\n"
+                f"You are an expert native-speaker linguist and audio transcriptionist for {src_lang_name}. "
+                "The provided ASR draft is raw and likely contains severe phonetic "
+                "hallucinations, logical inconsistencies, and incorrect words. Listen "
+                f"to the audio and aggressively correct the text so it matches exactly "
+                f"what is spoken in {src_lang_name} and makes logical sense.\n\n"
+                "RULES:\n"
+                "1. The AUDIO is the absolute truth. If the text draft makes no sense, trust your ears.\n"
+                "2. Fix all grammatical cases, declensions, and incorrect vocabulary.\n"
+                f"3. Apply strict, proper native {src_lang_name} orthography.\n"
+                "4. Do not just fix punctuation; you are authorized to completely change words to match the audio's true meaning.\n\n"
+                f"Draft: {phrase['text']}\n\n"
                 "Output STRICTLY the corrected text and nothing else."
             )
             conversation = [{
@@ -911,9 +919,11 @@ def run_pipeline(
         )
         if do_refine:
             logger.info("Phase 2.5: Multimodal refinement with (%s)...", correction_model)
-            refined = execute_omni_refinement(v_deecho, phrases, correction_model)
+            # Pass src_name as the fourth argument
+            refined = execute_omni_refinement(v_deecho, phrases, correction_model, src_name)
 
             logger.info("--- Phase 2.5: audio-text correction diff ---")
+            # ... (Keep the rest of the diff logging) ...
             corrections_made = 0
             for i in range(expected_count):
                 orig = phrases[i]["text"].strip()
