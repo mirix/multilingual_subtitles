@@ -10,8 +10,6 @@ import soundfile as sf
 import torch
 import re
 import difflib
-from wtpsplit import SaT
-from audio_separator.separator import Separator
 
 # Configure System Logging
 logging.basicConfig(
@@ -23,28 +21,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =====================================================================
-# GLOBALS & LAZY LOADING
+# GLOBALS, LAZY LOADING & DICTIONARIES
 # =====================================================================
 
+# Intersection of Parakeet-v3 (25), VibeVoice (50+), and SaT-12l (300+)
+INPUT_LANGUAGES = {
+    "en": "English", "es": "Spanish", "fr": "French", "de": "German",
+    "bg": "Bulgarian", "hr": "Croatian", "cs": "Czech", "da": "Danish",
+    "nl": "Dutch", "et": "Estonian", "fi": "Finnish", "el": "Greek",
+    "hu": "Hungarian", "it": "Italian", "lv": "Latvian", "lt": "Lithuanian",
+    "mt": "Maltese", "pl": "Polish", "pt": "Portuguese", "ro": "Romanian",
+    "sk": "Slovak", "sl": "Slovenian", "sv": "Swedish", "ru": "Russian",
+    "uk": "Ukrainian"
+}
+
+# TranslateGemma-27B Official 55 Languages
+OUTPUT_LANGUAGES = {
+    "en": "English", "es": "Spanish", "fr": "French", "de": "German", 
+    "it": "Italian", "pt": "Portuguese", "ru": "Russian", "zh": "Chinese", 
+    "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi", 
+    "bn": "Bengali", "id": "Indonesian", "tr": "Turkish", "vi": "Vietnamese", 
+    "pl": "Polish", "nl": "Dutch", "th": "Thai", "cs": "Czech", 
+    "sv": "Swedish", "ro": "Romanian", "hu": "Hungarian", "da": "Danish", 
+    "fi": "Finnish", "el": "Greek", "uk": "Ukrainian", "bg": "Bulgarian", 
+    "sk": "Slovak", "hr": "Croatian", "lt": "Lithuanian", "sl": "Slovenian", 
+    "et": "Estonian", "lv": "Latvian", "sr": "Serbian", "ca": "Catalan", 
+    "ms": "Malay", "tl": "Tagalog", "ta": "Tamil", "te": "Telugu", 
+    "ml": "Malayalam", "mr": "Marathi", "ur": "Urdu", "fa": "Persian", 
+    "he": "Hebrew", "sw": "Swahili", "am": "Amharic", "yo": "Yoruba", 
+    "zu": "Zulu", "af": "Afrikaans", "is": "Icelandic", "ka": "Georgian", 
+    "hy": "Armenian", "km": "Khmer", "my": "Burmese", "ne": "Nepali"
+}
+
+OMITTED = "[OMITTED_BY_LLM]"
 sat_model = None
 
 def get_sat_model():
     global sat_model
     if sat_model is None:
-        logger.info("Initializing SaT (Segment any Text) Semantic Segmentation Model...")
-        sat_model = SaT("sat-3l-sm")
+        logger.info("Initializing SaT (Segment any Text) 12-Layer Model...")
+        # Lazy load to keep CLI help instantaneous
+        from wtpsplit import SaT 
+        sat_model = SaT("sat-12l-sm")
     return sat_model
-
-PARAKEET_LANGUAGES = {
-    "en": "English", "zh": "Chinese", "es": "Spanish", "fr": "French",
-    "de": "German", "ru": "Russian", "it": "Italian", "pt": "Portuguese",
-    "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "nl": "Dutch",
-    "sv": "Swedish", "pl": "Polish", "tr": "Turkish", "hi": "Hindi",
-    "vi": "Vietnamese", "id": "Indonesian", "cs": "Czech", "uk": "Ukrainian",
-    "el": "Greek", "ro": "Romanian", "hu": "Hungarian", "da": "Danish", "fi": "Finnish"
-}
-
-OMITTED = "[OMITTED_BY_LLM]"
 
 # =====================================================================
 # UTILITIES & LLAMA.CPP LOADER
@@ -61,7 +80,6 @@ def flush_vram(stage: str = ""):
         logger.info(f"VRAM [{stage}]: {allocated_gb:.2f} GB allocated, {reserved_gb:.2f} GB reserved")
 
 def _load_llm(model_path: str, context_size: int = 16384):
-    """Load a GGUF model using llama-cpp-python exclusively."""
     try:
         from llama_cpp import Llama
     except ImportError:
@@ -93,6 +111,9 @@ def extract_audio_from_video(video_path: str, output_audio_path: str):
 def run_isolation_inference(input_path: str, model_filename: str, output_key: str, output_dir: str,
                             primary_stem: str = "Vocals", secondary_stem: str = "Instrumental") -> str:
     logger.info(f"Running audio-separator with model: {model_filename}")
+    # Lazy load to prevent massive initialization on `--help`
+    from audio_separator.separator import Separator
+    
     separator = Separator(
         log_level=logging.WARNING, model_file_dir=os.path.join(output_dir, "models_cache"),
         output_dir=output_dir, output_format="WAV", normalization_threshold=0.9, use_autocast=True
@@ -154,7 +175,7 @@ def execute_parakeet_asr(audio_path: str, lang_override: str = "auto") -> list:
             decoding_cfg.preserve_alignments = True
             decoding_cfg.compute_timestamps = True
             decoding_cfg.word_seperator = " "
-            if lang_override_norm != "auto" and lang_override_norm in PARAKEET_LANGUAGES:
+            if lang_override_norm != "auto" and lang_override_norm in INPUT_LANGUAGES:
                 decoding_cfg.language = lang_override_norm
                 
         asr_model.change_decoding_strategy(decoding_cfg)
@@ -184,7 +205,7 @@ def execute_parakeet_asr(audio_path: str, lang_override: str = "auto") -> list:
         flush_vram("after Parakeet")
 
 def segment_words_into_phrases(words: list, max_gap_seconds: float = 3.5) -> list:
-    logger.info("Applying Acoustic + Semantic (SaT) Segmentation...")
+    logger.info("Applying Acoustic + Semantic (SaT-12L) Segmentation...")
     acoustic_chunks, current_chunk = [], []
     for i, word in enumerate(words):
         current_chunk.append(word)
@@ -236,7 +257,6 @@ def segment_words_into_phrases(words: list, max_gap_seconds: float = 3.5) -> lis
 # =====================================================================
 
 def execute_vibevoice_refinement(audio_path: str, phrases: list, model_id: str) -> list:
-    """Uses Microsoft VibeVoice to act as a multimodal refiner, using Parakeet text as a guiding prompt."""
     logger.info(f"Loading Multimodal Refiner ({model_id}) via Transformers...")
     try:
         from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
@@ -256,7 +276,6 @@ def execute_vibevoice_refinement(audio_path: str, phrases: list, model_id: str) 
     
     logger.info(f"Refining {len(phrases)} phrases...")
     for i, phrase in enumerate(phrases):
-        # Slice audio with 200ms padding
         start_time = max(0.0, phrase["start"] - 0.2)
         end_time = min(len(y)/sr, phrase["end"] + 0.2)
         start_idx, end_idx = int(start_time * sr), int(end_time * sr)
@@ -265,7 +284,6 @@ def execute_vibevoice_refinement(audio_path: str, phrases: list, model_id: str) 
         temp_wav = f"workspace/temp_chunk_{i}.wav"
         sf.write(temp_wav, chunk, sr)
         
-        # We pass Parakeet's hypothesis as a context prompt
         inputs = processor.apply_transcription_request(
             audio=[temp_wav], 
             prompt=[phrase["text"]]
@@ -279,7 +297,6 @@ def execute_vibevoice_refinement(audio_path: str, phrases: list, model_id: str) 
         if os.path.exists(temp_wav):
             os.remove(temp_wav)
             
-        # Fallback to original text if model completely fails to generate
         corrected_texts.append(transcription.strip() or phrase["text"])
         
     del model
@@ -403,8 +420,8 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
         expected_count = len(phrases)
         if expected_count == 0: return
 
-        src_name = PARAKEET_LANGUAGES.get(source_override, source_override.upper()) if source_override != "auto" else "its natively detected language"
-        tgt_name = PARAKEET_LANGUAGES.get(target_lang, target_lang.upper())
+        src_name = INPUT_LANGUAGES.get(source_override, source_override.upper()) if source_override != "auto" else "its natively detected language"
+        tgt_name = OUTPUT_LANGUAGES.get(target_lang, target_lang.upper())
 
         corrected_texts = [p["text"] for p in phrases]
 
@@ -413,7 +430,6 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
             logger.info(f"Phase 2.5: Executing Multimodal Refinement with ({correction_model})...")
             corrected_texts = execute_vibevoice_refinement(v_deecho, phrases, correction_model)
 
-            # Restore the Diff Logger
             logger.info("--- Phase 2.5: Audio-Text Correction Diff ---")
             corrections_made = 0
             for i in range(expected_count):
@@ -424,7 +440,6 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
                     corrections_made += 1
                 phrases[i]["corrected_text"] = corr
             logger.info(f"Total audio-guided corrections: {corrections_made}")
-
         else:
             logger.info("Phase 2.5 Skipped: Using raw ASR text directly.")
             for i in range(expected_count):
@@ -444,7 +459,6 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
                 expected_count=expected_count, recovery_label="translation"
             )
             
-            # Hard delete the LlamaCPP model
             if hasattr(model_trans, 'close'): model_trans.close()
             del model_trans
             flush_vram("after translator unload")
@@ -503,7 +517,7 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
         ]
         for idx, phrase in enumerate(phrases):
             line_start, line_end = phrase["words"][0]["start"], phrase["words"][-1]["end"]
-            k_str, curr_t = line_start
+            k_str, curr_t = "", line_start
             for w in phrase["words"]:
                 if (gap := int(round((w["start"] - curr_t) * 100))) > 0: k_str += f"{{\\k{gap}}}"
                 k_str += f"{{\\k{max(1, int(round((w['end'] - w['start']) * 100)))}}}{w['text']} "
@@ -525,10 +539,31 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
         flush_vram("end of pipeline")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Standalone Multilingual Karaoke Builder.")
+    def format_dict_for_help(d: dict, row_length: int = 5) -> str:
+        items = [f"{k} ({v})" for k, v in d.items()]
+        rows = [", ".join(items[i:i + row_length]) for i in range(0, len(items), row_length)]
+        return "\n  ".join(rows)
+
+    # Use RawTextHelpFormatter to preserve newlines in the help output
+    parser = argparse.ArgumentParser(
+        description="Standalone Multilingual Karaoke Builder.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    
     parser.add_argument("video_path", help="Source media file.")
-    parser.add_argument("-t", "--target-lang", default="en", help="ISO translation target.")
-    parser.add_argument("-s", "--source-lang", default="auto", help="ISO acoustic source.")
+    
+    parser.add_argument(
+        "-t", "--target-lang", 
+        default="en", 
+        help=f"ISO translation target. Supported Outputs:\n  {format_dict_for_help(OUTPUT_LANGUAGES)}"
+    )
+    
+    parser.add_argument(
+        "-s", "--source-lang", 
+        default="auto", 
+        help=f"ISO acoustic source. Supported Inputs:\n  {format_dict_for_help(INPUT_LANGUAGES)}"
+    )
+    
     parser.add_argument("-c", "--correction-model", default="microsoft/VibeVoice-ASR-HF", help="HuggingFace model ID for multimodal ASR refinement. Use 'none' to skip.")
     parser.add_argument("-m", "--translation-model", default="workspace/models_cache/translategemma-27b-it-Q5_K_M.gguf", help="Local .gguf path for translation. Use 'none' to skip.")
     parser.add_argument("--skip-correction", action="store_true", help="Skip Phase 2.5 (Multimodal Refinement) to save VRAM.")
