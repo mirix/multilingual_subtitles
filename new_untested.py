@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # GLOBALS, LAZY LOADING & DICTIONARIES
 # =====================================================================
 
-# Intersection of Parakeet-v3 (25), VibeVoice (50+), and SaT-12l (300+)
+# Intersection of Parakeet-v3 (25), Omni Audio Encoders, and SaT-12l
 INPUT_LANGUAGES = {
     "en": "English", "es": "Spanish", "fr": "French", "de": "German",
     "bg": "Bulgarian", "hr": "Croatian", "cs": "Czech", "da": "Danish",
@@ -35,7 +35,7 @@ INPUT_LANGUAGES = {
     "uk": "Ukrainian"
 }
 
-# TranslateGemma-27B Official 55 Languages
+# TranslateGemma Official 55 Languages
 OUTPUT_LANGUAGES = {
     "en": "English", "es": "Spanish", "fr": "French", "de": "German", 
     "it": "Italian", "pt": "Portuguese", "ru": "Russian", "zh": "Chinese", 
@@ -66,7 +66,7 @@ def get_sat_model():
     return sat_model
 
 # =====================================================================
-# UTILITIES & LLAMA.CPP LOADER
+# UTILITIES
 # =====================================================================
 
 def flush_vram(stage: str = ""):
@@ -78,21 +78,6 @@ def flush_vram(stage: str = ""):
         allocated_gb = torch.cuda.memory_allocated() / 1e9
         reserved_gb = torch.cuda.memory_reserved() / 1e9
         logger.info(f"VRAM [{stage}]: {allocated_gb:.2f} GB allocated, {reserved_gb:.2f} GB reserved")
-
-def _load_llm(model_path: str, context_size: int = 16384):
-    try:
-        from llama_cpp import Llama
-    except ImportError:
-        logger.error("llama-cpp-python not found. Install with CUDA support.")
-        raise
-    
-    abs_path = os.path.abspath(model_path)
-    if not os.path.exists(abs_path):
-        raise FileNotFoundError(f"GGUF file not found at absolute path: {abs_path}")
-        
-    logger.info(f"Loading GGUF model: {abs_path}")
-    model = Llama(model_path=abs_path, n_gpu_layers=-1, n_ctx=context_size, verbose=False)
-    return model
 
 def _escape_for_ffmpeg_subtitles(path: str) -> str:
     if os.name == 'nt':
@@ -111,7 +96,6 @@ def extract_audio_from_video(video_path: str, output_audio_path: str):
 def run_isolation_inference(input_path: str, model_filename: str, output_key: str, output_dir: str,
                             primary_stem: str = "Vocals", secondary_stem: str = "Instrumental") -> str:
     logger.info(f"Running audio-separator with model: {model_filename}")
-    # Lazy load to prevent massive initialization on `--help`
     from audio_separator.separator import Separator
     
     separator = Separator(
@@ -200,8 +184,7 @@ def execute_parakeet_asr(audio_path: str, lang_override: str = "auto") -> list:
         return raw_words
         
     finally:
-        if 'asr_model' in locals():
-            del asr_model
+        if 'asr_model' in locals(): del asr_model
         flush_vram("after Parakeet")
 
 def segment_words_into_phrases(words: list, max_gap_seconds: float = 3.5) -> list:
@@ -253,59 +236,64 @@ def segment_words_into_phrases(words: list, max_gap_seconds: float = 3.5) -> lis
     return final_phrases
 
 # =====================================================================
-# PHASE 2.5: MULTIMODAL AUDIO-TEXT REFINER
+# PHASE 2.5: MULTIMODAL AUDIO-TEXT REFINER (GEMMA 4 OMNI)
 # =====================================================================
 
-def execute_vibevoice_refinement(audio_path: str, phrases: list, model_id: str) -> list:
-    logger.info(f"Loading Multimodal Refiner ({model_id}) via Transformers...")
-    try:
-        from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
-    except ImportError:
-        logger.error("Please install transformers>=5.3.0 for VibeVoice support.")
-        raise
-        
-    processor = AutoProcessor.from_pretrained(model_id)
-    model = VibeVoiceAsrForConditionalGeneration.from_pretrained(
+def execute_omni_refinement(audio_path: str, phrases: list, model_id: str) -> list:
+    logger.info(f"Loading Omni Refiner ({model_id}) via Transformers...")
+    from transformers import AutoProcessor, AutoModelForCausalLM
+    
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
         model_id, 
         device_map="auto", 
-        torch_dtype="auto"
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True
     )
     
     y, sr = librosa.load(audio_path, sr=16000)
     corrected_texts = []
     
-    logger.info(f"Refining {len(phrases)} phrases...")
+    logger.info(f"Refining {len(phrases)} phrases via Omni Engine...")
     for i, phrase in enumerate(phrases):
         start_time = max(0.0, phrase["start"] - 0.2)
         end_time = min(len(y)/sr, phrase["end"] + 0.2)
         start_idx, end_idx = int(start_time * sr), int(end_time * sr)
         chunk = y[start_idx:end_idx]
         
-        temp_wav = f"workspace/temp_chunk_{i}.wav"
-        sf.write(temp_wav, chunk, sr)
+        prompt_instructions = (
+            "You are an expert audio editor and linguist. Listen to the provided audio chunk "
+            "and read the drafted ASR transcription below. Correct the transcription, fixing any "
+            "phonetic hallucinations or grammatical errors. Ensure the semantic meaning matches the audio.\n\n"
+            f"Draft: {phrase['text']}\n\n"
+            "Output STRICTLY the corrected text and nothing else."
+        )
+
+        conversation = [
+            {"role": "user", "content": [
+                {"type": "audio"},
+                {"type": "text", "text": prompt_instructions}
+            ]}
+        ]
         
-        inputs = processor.apply_transcription_request(
-            audio=[temp_wav], 
-            prompt=[phrase["text"]]
-        ).to(model.device)
+        text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+        inputs = processor(text=text_prompt, audios=chunk, return_tensors="pt", sampling_rate=16000).to(model.device)
         
         with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=256)
+            outputs = model.generate(**inputs, max_new_tokens=256, temperature=0.1)
             
-        transcription = processor.batch_decode(outputs, skip_special_tokens=True)[0]
+        generated_ids = outputs[0][inputs.input_ids.shape[1]:]
+        transcription = processor.decode(generated_ids, skip_special_tokens=True).strip()
         
-        if os.path.exists(temp_wav):
-            os.remove(temp_wav)
-            
-        corrected_texts.append(transcription.strip() or phrase["text"])
+        corrected_texts.append(transcription or phrase["text"])
         
     del model
     del processor
-    flush_vram("after VibeVoice Refiner")
+    flush_vram("after Omni Refiner")
     return corrected_texts
 
 # =====================================================================
-# PHASE 3: TRANSLATION (LLAMA.CPP)
+# PHASE 3: TRANSLATION (TRANSLATEGEMMA VIA TRANSFORMERS)
 # =====================================================================
 
 def _parse_numbered_lines(completion: str, expected_count: int) -> list:
@@ -329,42 +317,43 @@ def _parse_numbered_lines(completion: str, expected_count: int) -> list:
                 
     return [res if res else OMITTED for res in result_lines]
 
-def execute_llm_task(model, prompt: str, expected_count: int) -> list:
+def execute_hf_task(model, tokenizer, prompt: str, expected_count: int) -> list:
     messages = [
-        {"role": "system", "content": "You are a precise data formatting AI. Output strictly the requested numbered lines. Output NOTHING else but the requested numbered format."},
-        {"role": "user", "content": prompt}
+        {"role": "user", "content": f"You are a precise data formatting AI. Output strictly the requested numbered lines. Output NOTHING else.\n\n{prompt}"}
     ]
     
-    response = model.create_chat_completion(
-        messages=messages, max_tokens=8192, temperature=0.3, top_p=0.85, min_p=0.05
-    )
-    completion = response['choices'][0]['message']['content']
+    text_inputs = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text_inputs, return_tensors="pt").to(model.device)
+    
+    with torch.no_grad():
+        outputs = model.generate(**inputs, max_new_tokens=8192, temperature=0.3, top_p=0.85)
+        
+    completion = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
     
     if "<think>" in completion:
         if "</think>" in completion:
             completion = completion.split("</think>")[-1].strip()
         else:
-            logger.warning("Thinking block was not closed. The model likely ran out of tokens.")
             completion = completion.split("<think>")[-1]
             
     return _parse_numbered_lines(completion, expected_count)
 
-def execute_task_with_recovery(model, prompt_builder, expected_count: int, recovery_label: str = "task") -> list:
+def execute_task_with_recovery(model, tokenizer, prompt_builder, expected_count: int, recovery_label: str = "task") -> list:
     if expected_count == 0: return []
     
     primary_prompt = prompt_builder(list(range(expected_count)))
-    result = execute_llm_task(model, primary_prompt, expected_count)
+    result = execute_hf_task(model, tokenizer, primary_prompt, expected_count)
 
     omitted = [i for i, r in enumerate(result) if r == OMITTED]
     if not omitted: return result
 
     if len(omitted) > expected_count // 2:
-        logger.warning(f"[{recovery_label}] Skipping recovery (systemic failure - likely hit token limits or formatting hallucination).")
+        logger.warning(f"[{recovery_label}] Skipping recovery (systemic failure - hit token limits).")
         return result
 
     logger.info(f"[{recovery_label}] Recovering {len(omitted)} omitted lines...")
     recovery_prompt = prompt_builder(omitted)
-    recovered = execute_llm_task(model, recovery_prompt, len(omitted))
+    recovered = execute_hf_task(model, tokenizer, recovery_prompt, len(omitted))
     
     for slot, rec_text in zip(omitted, recovered):
         if rec_text != OMITTED: result[slot] = rec_text
@@ -428,7 +417,7 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
         # ---- PHASE 2.5: MULTIMODAL AUDIO-TEXT REFINEMENT ----
         if not skip_correction and correction_model and correction_model.lower() != "none":
             logger.info(f"Phase 2.5: Executing Multimodal Refinement with ({correction_model})...")
-            corrected_texts = execute_vibevoice_refinement(v_deecho, phrases, correction_model)
+            corrected_texts = execute_omni_refinement(v_deecho, phrases, correction_model)
 
             logger.info("--- Phase 2.5: Audio-Text Correction Diff ---")
             corrections_made = 0
@@ -451,16 +440,23 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
         
         if needs_translation and translation_model and translation_model.lower() != "none":
             logger.info(f"Phase 3: Loading Translator LLM ({translation_model})...")
-            model_trans = _load_llm(translation_model)
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            
+            tokenizer = AutoTokenizer.from_pretrained(translation_model)
+            model_trans = AutoModelForCausalLM.from_pretrained(
+                translation_model, 
+                device_map="auto", 
+                torch_dtype=torch.bfloat16
+            )
             
             translations = execute_task_with_recovery(
-                model_trans,
+                model_trans, tokenizer,
                 prompt_builder=lambda indices: _build_translation_prompt(phrases, corrected_texts, indices, src_name, tgt_name),
                 expected_count=expected_count, recovery_label="translation"
             )
             
-            if hasattr(model_trans, 'close'): model_trans.close()
             del model_trans
+            del tokenizer
             flush_vram("after translator unload")
             
             translations = ["" if t == OMITTED else t for t in translations]
@@ -544,7 +540,6 @@ if __name__ == "__main__":
         rows = [", ".join(items[i:i + row_length]) for i in range(0, len(items), row_length)]
         return "\n  ".join(rows)
 
-    # Use RawTextHelpFormatter to preserve newlines in the help output
     parser = argparse.ArgumentParser(
         description="Standalone Multilingual Karaoke Builder.",
         formatter_class=argparse.RawTextHelpFormatter
@@ -564,8 +559,8 @@ if __name__ == "__main__":
         help=f"ISO acoustic source. Supported Inputs:\n  {format_dict_for_help(INPUT_LANGUAGES)}"
     )
     
-    parser.add_argument("-c", "--correction-model", default="microsoft/VibeVoice-ASR-HF", help="HuggingFace model ID for multimodal ASR refinement. Use 'none' to skip.")
-    parser.add_argument("-m", "--translation-model", default="workspace/models_cache/translategemma-27b-it-Q5_K_M.gguf", help="Local .gguf path for translation. Use 'none' to skip.")
+    parser.add_argument("-c", "--correction-model", default="google/gemma-4-E4B-it", help="HuggingFace model ID for Omni multimodal ASR refinement. Use 'none' to skip.")
+    parser.add_argument("-m", "--translation-model", default="google/translategemma-12b-it", help="HuggingFace model ID for translation. Use 'none' to skip.")
     parser.add_argument("--skip-correction", action="store_true", help="Skip Phase 2.5 (Multimodal Refinement) to save VRAM.")
 
     args = parser.parse_args()
