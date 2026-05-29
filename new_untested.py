@@ -47,7 +47,7 @@ PARAKEET_LANGUAGES = {
 OMITTED = "[OMITTED_BY_LLM]"
 
 # =====================================================================
-# UTILITIES 
+# UTILITIES & LLAMA.CPP LOADER
 # =====================================================================
 
 def flush_vram(stage: str = ""):
@@ -60,14 +60,29 @@ def flush_vram(stage: str = ""):
         reserved_gb = torch.cuda.memory_reserved() / 1e9
         logger.info(f"VRAM [{stage}]: {allocated_gb:.2f} GB allocated, {reserved_gb:.2f} GB reserved")
 
+def _load_llm(model_path: str, context_size: int = 16384):
+    """Load a GGUF model using llama-cpp-python exclusively."""
+    try:
+        from llama_cpp import Llama
+    except ImportError:
+        logger.error("llama-cpp-python not found. Install with CUDA support.")
+        raise
+    
+    abs_path = os.path.abspath(model_path)
+    if not os.path.exists(abs_path):
+        raise FileNotFoundError(f"GGUF file not found at absolute path: {abs_path}")
+        
+    logger.info(f"Loading GGUF model: {abs_path}")
+    model = Llama(model_path=abs_path, n_gpu_layers=-1, n_ctx=context_size, verbose=False)
+    return model
+
 def _escape_for_ffmpeg_subtitles(path: str) -> str:
     if os.name == 'nt':
         return path.replace('\\', '/').replace(':', '\\:')
     return path.replace(':', '\\:')
 
-
 # =====================================================================
-# PHASE 1 & 2: ISOLATION AND BASE ASR (PARAKEET)
+# PHASE 1 & 2: ISOLATION AND ASR
 # =====================================================================
 
 def extract_audio_from_video(video_path: str, output_audio_path: str):
@@ -143,7 +158,7 @@ def execute_parakeet_asr(audio_path: str, lang_override: str = "auto") -> list:
                 decoding_cfg.language = lang_override_norm
                 
         asr_model.change_decoding_strategy(decoding_cfg)
-        logger.info("Transcribing audio for base timestamps...")
+        logger.info("Transcribing audio...")
         hypothesis = asr_model.transcribe([temp_mono_path], return_hypotheses=True, timestamps=True)[0]
         
         raw_words = []
@@ -164,7 +179,8 @@ def execute_parakeet_asr(audio_path: str, lang_override: str = "auto") -> list:
         return raw_words
         
     finally:
-        if 'asr_model' in locals(): del asr_model
+        if 'asr_model' in locals():
+            del asr_model
         flush_vram("after Parakeet")
 
 def segment_words_into_phrases(words: list, max_gap_seconds: float = 3.5) -> list:
@@ -215,69 +231,64 @@ def segment_words_into_phrases(words: list, max_gap_seconds: float = 3.5) -> lis
             })
     return final_phrases
 
-
 # =====================================================================
-# PHASE 2.5: MULTIMODAL REFINEMENT (HIGGS)
+# PHASE 2.5: MULTIMODAL AUDIO-TEXT REFINER
 # =====================================================================
 
-def execute_multimodal_refinement(audio_path: str, phrases: list) -> list:
-    logger.info("Initializing BosonAI Higgs-Audio-v3-8B-STT-v2 for Multimodal Refinement...")
-    from transformers import AutoModelForCausalLM, AutoProcessor
-    
+def execute_vibevoice_refinement(audio_path: str, phrases: list, model_id: str) -> list:
+    """Uses Microsoft VibeVoice to act as a multimodal refiner, using Parakeet text as a guiding prompt."""
+    logger.info(f"Loading Multimodal Refiner ({model_id}) via Transformers...")
     try:
-        processor = AutoProcessor.from_pretrained("bosonai/higgs-audio-v3-8b-stt-v2", trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            "bosonai/higgs-audio-v3-8b-stt-v2", 
-            torch_dtype=torch.float16, 
-            device_map="auto", 
-            trust_remote_code=True
-        )
-        model.eval()
+        from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
+    except ImportError:
+        logger.error("Please install transformers>=5.3.0 for VibeVoice support.")
+        raise
         
-        y, sr = librosa.load(audio_path, sr=16000, mono=True)
-        corrected_texts = []
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = VibeVoiceAsrForConditionalGeneration.from_pretrained(
+        model_id, 
+        device_map="auto", 
+        torch_dtype="auto"
+    )
+    
+    y, sr = librosa.load(audio_path, sr=16000)
+    corrected_texts = []
+    
+    logger.info(f"Refining {len(phrases)} phrases...")
+    for i, phrase in enumerate(phrases):
+        # Slice audio with 200ms padding
+        start_time = max(0.0, phrase["start"] - 0.2)
+        end_time = min(len(y)/sr, phrase["end"] + 0.2)
+        start_idx, end_idx = int(start_time * sr), int(end_time * sr)
+        chunk = y[start_idx:end_idx]
         
-        for idx, phrase in enumerate(phrases):
-            draft_text = phrase["text"]
-            
-            # Slice audio for just this phrase (with 0.2s padding for context)
-            start_sample = max(0, int((phrase['start'] - 0.2) * sr))
-            end_sample = min(len(y), int((phrase['end'] + 0.2) * sr))
-            audio_chunk = y[start_sample:end_sample]
-            
-            # Construct a ChatML-style prompt forcing the model to fix the draft based on the audio chunk
-            prompt = (
-                f"<|im_start|>system\nYou are an expert lyrics editor. Listen to the provided audio chunk "
-                f"and fix any ASR phonetic errors in the draft text. Output ONLY the corrected text, with no conversational padding.<|im_end|>\n"
-                f"<|im_start|>user\nDraft Text: {draft_text}<|im_end|>\n<|im_start|>assistant\n"
-            )
-            
-            inputs = processor(text=prompt, audios=audio_chunk, sampling_rate=sr, return_tensors="pt").to("cuda")
-            
-            with torch.no_grad():
-                generated_ids = model.generate(**inputs, max_new_tokens=256, do_sample=False)
-                
-            output = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            
-            # Extract just the assistant's reply
-            if "assistant\n" in output:
-                corrected = output.split("assistant\n")[-1].strip()
-            else:
-                corrected = output.strip()
-                
-            corrected_texts.append(corrected)
-            logger.info(f"Refined Line {idx + 1}: [Draft] {draft_text} -> [Final] {corrected}")
-            
-        return corrected_texts
+        temp_wav = f"workspace/temp_chunk_{i}.wav"
+        sf.write(temp_wav, chunk, sr)
         
-    finally:
-        if 'model' in locals(): del model
-        if 'processor' in locals(): del processor
-        flush_vram("after Higgs Refinement")
-
+        # We pass Parakeet's hypothesis as a context prompt
+        inputs = processor.apply_transcription_request(
+            audio=[temp_wav], 
+            prompt=[phrase["text"]]
+        ).to(model.device)
+        
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=256)
+            
+        transcription = processor.batch_decode(outputs, skip_special_tokens=True)[0]
+        
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
+            
+        # Fallback to original text if model completely fails to generate
+        corrected_texts.append(transcription.strip() or phrase["text"])
+        
+    del model
+    del processor
+    flush_vram("after VibeVoice Refiner")
+    return corrected_texts
 
 # =====================================================================
-# PHASE 3: DEDICATED MACHINE TRANSLATION (Hy-MT2-7B)
+# PHASE 3: TRANSLATION (LLAMA.CPP)
 # =====================================================================
 
 def _parse_numbered_lines(completion: str, expected_count: int) -> list:
@@ -288,6 +299,7 @@ def _parse_numbered_lines(completion: str, expected_count: int) -> list:
     for line in completion.strip().split("\n"):
         line = line.strip()
         if not line: continue
+        
         match = strict_pipe.match(line)
         if match:
             idx = int(match.group(1)) - 1
@@ -300,60 +312,67 @@ def _parse_numbered_lines(completion: str, expected_count: int) -> list:
                 
     return [res if res else OMITTED for res in result_lines]
 
-def execute_hymt_translation(corrected_texts: list, src_name: str, tgt_name: str) -> list:
-    logger.info("Initializing Tencent Hy-MT2-7B for Translation...")
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+def execute_llm_task(model, prompt: str, expected_count: int) -> list:
+    messages = [
+        {"role": "system", "content": "You are a precise data formatting AI. Output strictly the requested numbered lines. Output NOTHING else but the requested numbered format."},
+        {"role": "user", "content": prompt}
+    ]
     
-    expected_count = len(corrected_texts)
-    source_payload = "\n".join(f"{i + 1}| {text}" for i, text in enumerate(corrected_texts))
-    
-    prompt = (
-        f"Translate the following lyrical lines from {src_name} into fluent {tgt_name}.\n\n"
-        f"CRITICAL RULES:\n"
-        f"- There are exactly {expected_count} numbered items. Never alter or shift line boundaries.\n"
-        f"- Output your final translations only using the exact formatting match: '<number>| <translated text>'.\n"
-        f"- Start your output block instantly with '1| '.\n\n"
-        f"--- SOURCE TEXTS ({src_name}) ---\n{source_payload}\n--- TRANSLATIONS ---\n"
+    response = model.create_chat_completion(
+        messages=messages, max_tokens=8192, temperature=0.3, top_p=0.85, min_p=0.05
     )
+    completion = response['choices'][0]['message']['content']
     
-    try:
-        tokenizer = AutoTokenizer.from_pretrained("tencent/Hy-MT2-7B")
-        model = AutoModelForCausalLM.from_pretrained(
-            "tencent/Hy-MT2-7B", 
-            torch_dtype=torch.float16, 
-            device_map="auto"
-        )
-        model.eval()
-        
-        messages = [
-            {"role": "system", "content": "You are a professional machine translation system. Translate the text line by line accurately while strictly preserving line numbers and format."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        text_input = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer([text_input], return_tensors="pt").to("cuda")
-        
-        logger.info("Running translation batch...")
-        with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=4096, temperature=0.1, do_sample=False)
+    if "<think>" in completion:
+        if "</think>" in completion:
+            completion = completion.split("</think>")[-1].strip()
+        else:
+            logger.warning("Thinking block was not closed. The model likely ran out of tokens.")
+            completion = completion.split("<think>")[-1]
             
-        # Extract purely the generated portion
-        generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, generated_ids)]
-        completion = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        
-        return _parse_numbered_lines(completion, expected_count)
-        
-    finally:
-        if 'model' in locals(): del model
-        if 'tokenizer' in locals(): del tokenizer
-        flush_vram("after Hy-MT2 Translation")
+    return _parse_numbered_lines(completion, expected_count)
 
+def execute_task_with_recovery(model, prompt_builder, expected_count: int, recovery_label: str = "task") -> list:
+    if expected_count == 0: return []
+    
+    primary_prompt = prompt_builder(list(range(expected_count)))
+    result = execute_llm_task(model, primary_prompt, expected_count)
+
+    omitted = [i for i, r in enumerate(result) if r == OMITTED]
+    if not omitted: return result
+
+    if len(omitted) > expected_count // 2:
+        logger.warning(f"[{recovery_label}] Skipping recovery (systemic failure - likely hit token limits or formatting hallucination).")
+        return result
+
+    logger.info(f"[{recovery_label}] Recovering {len(omitted)} omitted lines...")
+    recovery_prompt = prompt_builder(omitted)
+    recovered = execute_llm_task(model, recovery_prompt, len(omitted))
+    
+    for slot, rec_text in zip(omitted, recovered):
+        if rec_text != OMITTED: result[slot] = rec_text
+        
+    return result
+
+def _build_translation_prompt(phrases: list, corrected_texts: list, indices: list, src_name: str, tgt_name: str) -> str:
+    corrected_source = "\n".join(f"{slot + 1}| {corrected_texts[orig_idx]}" for slot, orig_idx in enumerate(indices))
+    return (
+        f"Translate the following lines from {src_name} into {tgt_name}.\n\n"
+        f"RULES:\n"
+        f"- There are exactly {len(indices)} numbered lines. Do not shift content across line boundaries.\n"
+        f"- Output the translation only.\n"
+        f"- Maintain the exact format: '<number>| <translated text>'.\n"
+        f"- Start your response directly with '1| '.\n\n"
+        f"--- SOURCE ({src_name}) ---\n{corrected_source}\n--- TARGET ({tgt_name}) ---\n"
+    )
 
 # =====================================================================
 # GLOBAL ORCHESTRATION LOOP
 # =====================================================================
 
-def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto", skip_correction: bool = False):
+def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto",
+                 correction_model: str | None = None, translation_model: str | None = None,
+                 skip_correction: bool = False):
                  
     base_dir = "workspace"
     os.makedirs(base_dir, exist_ok=True)
@@ -377,38 +396,65 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
         d_stem = run_isolation_inference(v_stft, "dereverb-echo_mel_band_roformer_sdr_13.4843_v2.ckpt", "dereverb", base_dir, "dry", "no dry")
         os.rename(d_stem, v_deecho)
 
-        # ---- PHASE 2: BASE TIMESTAMPS (PARAKEET) ----
+        # ---- PHASE 2: ASR ----
         words = execute_parakeet_asr(v_deecho, source_override)
         if not words: return
         phrases = segment_words_into_phrases(words, max_gap_seconds=3.5)
         expected_count = len(phrases)
         if expected_count == 0: return
 
-        src_name = PARAKEET_LANGUAGES.get(source_override, source_override.upper()) if source_override != "auto" else "Detected Language"
+        src_name = PARAKEET_LANGUAGES.get(source_override, source_override.upper()) if source_override != "auto" else "its natively detected language"
         tgt_name = PARAKEET_LANGUAGES.get(target_lang, target_lang.upper())
 
-        # ---- PHASE 2.5: MULTIMODAL REFINEMENT (HIGGS) ----
-        if not skip_correction:
-            corrected_texts = execute_multimodal_refinement(v_deecho, phrases)
+        corrected_texts = [p["text"] for p in phrases]
+
+        # ---- PHASE 2.5: MULTIMODAL AUDIO-TEXT REFINEMENT ----
+        if not skip_correction and correction_model and correction_model.lower() != "none":
+            logger.info(f"Phase 2.5: Executing Multimodal Refinement with ({correction_model})...")
+            corrected_texts = execute_vibevoice_refinement(v_deecho, phrases, correction_model)
+
+            # Restore the Diff Logger
+            logger.info("--- Phase 2.5: Audio-Text Correction Diff ---")
+            corrections_made = 0
             for i in range(expected_count):
-                phrases[i]["corrected_text"] = corrected_texts[i] if corrected_texts[i] else phrases[i]["text"]
+                orig = phrases[i]["text"].strip()
+                corr = corrected_texts[i].strip()
+                if orig != corr:
+                    logger.info(f"Line {i + 1}:\n  - {orig}\n  + {corr}")
+                    corrections_made += 1
+                phrases[i]["corrected_text"] = corr
+            logger.info(f"Total audio-guided corrections: {corrections_made}")
+
         else:
             logger.info("Phase 2.5 Skipped: Using raw ASR text directly.")
             for i in range(expected_count):
                 phrases[i]["corrected_text"] = phrases[i]["text"]
 
-        # ---- PHASE 3: TRANSLATION (Hy-MT2-7B) ----
+        # ---- PHASE 3: TRANSLATION ----
         translations = []
         needs_translation = target_lang and target_lang != source_override
         
-        if needs_translation:
-            translations = execute_hymt_translation([p["corrected_text"] for p in phrases], src_name, tgt_name)
+        if needs_translation and translation_model and translation_model.lower() != "none":
+            logger.info(f"Phase 3: Loading Translator LLM ({translation_model})...")
+            model_trans = _load_llm(translation_model)
+            
+            translations = execute_task_with_recovery(
+                model_trans,
+                prompt_builder=lambda indices: _build_translation_prompt(phrases, corrected_texts, indices, src_name, tgt_name),
+                expected_count=expected_count, recovery_label="translation"
+            )
+            
+            # Hard delete the LlamaCPP model
+            if hasattr(model_trans, 'close'): model_trans.close()
+            del model_trans
+            flush_vram("after translator unload")
+            
             translations = ["" if t == OMITTED else t for t in translations]
         else:
-            logger.info("Target language matches source; skipping translation.")
-            translations = [p["corrected_text"] for p in phrases]
+            logger.info("Target language matches source or no translator provided; skipping translation.")
+            translations = list(corrected_texts)
 
-        # ---- PHASE 4: DIFF ALIGNMENT & COMPILE ----
+        # ---- PHASE 4: COMPILE ----
         def get_vid_res(p):
             try: return map(int, subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", p], text=True).strip().split('x'))
             except: return 1920, 1080
@@ -457,7 +503,7 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
         ]
         for idx, phrase in enumerate(phrases):
             line_start, line_end = phrase["words"][0]["start"], phrase["words"][-1]["end"]
-            k_str, curr_t = "", line_start
+            k_str, curr_t = line_start
             for w in phrase["words"]:
                 if (gap := int(round((w["start"] - curr_t) * 100))) > 0: k_str += f"{{\\k{gap}}}"
                 k_str += f"{{\\k{max(1, int(round((w['end'] - w['start']) * 100)))}}}{w['text']} "
@@ -479,11 +525,13 @@ def run_pipeline(video_path: str, target_lang: str, source_override: str = "auto
         flush_vram("end of pipeline")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Standalone Multilingual Karaoke Builder (Transformers Edition).")
+    parser = argparse.ArgumentParser(description="Standalone Multilingual Karaoke Builder.")
     parser.add_argument("video_path", help="Source media file.")
     parser.add_argument("-t", "--target-lang", default="en", help="ISO translation target.")
     parser.add_argument("-s", "--source-lang", default="auto", help="ISO acoustic source.")
-    parser.add_argument("--skip-correction", action="store_true", help="Skip Phase 2.5 (Semantic Correction).")
+    parser.add_argument("-c", "--correction-model", default="microsoft/VibeVoice-ASR-HF", help="HuggingFace model ID for multimodal ASR refinement. Use 'none' to skip.")
+    parser.add_argument("-m", "--translation-model", default="workspace/models_cache/translategemma-27b-it-Q5_K_M.gguf", help="Local .gguf path for translation. Use 'none' to skip.")
+    parser.add_argument("--skip-correction", action="store_true", help="Skip Phase 2.5 (Multimodal Refinement) to save VRAM.")
 
     args = parser.parse_args()
-    run_pipeline(args.video_path, args.target_lang, args.source_lang, args.skip_correction)
+    run_pipeline(args.video_path, args.target_lang, args.source_lang, args.correction_model, args.translation_model, args.skip_correction)
