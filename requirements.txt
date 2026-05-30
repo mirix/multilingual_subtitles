@@ -2,6 +2,13 @@ librosa
 soundfile
 numpy
 omegaconf
+huggingface_hub
+sentencepiece
+protobuf
+einops
+openai-whisper
+faster-whisper
+lingua-language-detector
 audio-separator[gpu]
 wtpsplit[onnx-gpu]
 nemo_toolkit[asr]
