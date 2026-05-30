@@ -474,7 +474,7 @@ def _filter_candidates_by_language(candidates: list, source_code: str | None) ->
 
 
 def augment_phrases_with_nbest(audio_path: str, phrases: list, source_code: str | None = None,
-                               nbest: int = 4, pad: float = REFINER_CONTEXT_PAD):
+                               nbest: int = 3, pad: float = REFINER_CONTEXT_PAD):
     """Decode each phrase span with Parakeet beam search and store the top-N
     acoustic hypotheses on phrase['alternatives'] (primary first, deduped,
     cross-language alternatives removed).
@@ -995,7 +995,7 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--translation-model",
                         default="workspace/models_cache/Qwen3.6-27B-UD-Q4_K_XL.gguf",
                         help="Local .gguf path for translation. Use 'none' to skip.")
-    parser.add_argument("--nbest", type=int, default=4,
+    parser.add_argument("--nbest", type=int, default=3,
                         help="Number of Parakeet hypotheses per phrase for grounding (1 disables).")
     parser.add_argument("--whisper-lid-model", default="small",
                         help="Whisper model size used ONLY for language detection (e.g. base, small).")
