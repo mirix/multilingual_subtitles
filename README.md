@@ -4,7 +4,7 @@ This pipeline generates **word-level karaoke-style subtitles** for videos along 
 
 It utilizes an "Air-Gapped" architecture, separating the heavy acoustic transcription engine (NVIDIA NeMo Parakeet) from the translation engine (Tencent Hy-MT2) to prevent dependency conflicts and optimize VRAM allocation.
 
-If you choose a smaller translation model (1.8B vs the current 8B) and deactivate refinement you can run this on a toaster.
+If you choose a smaller translation model (1.8B vs the current 8B) and deactivate refinement you can run this on a toaster (possibly with as little as 3GB of VRAM).
 
 ---
 
