@@ -964,10 +964,11 @@ def build_uncertain_json(primary: str, candidates: list,
 def _build_refiner_prompt(phrase: dict, src_lang_name: str) -> str:
     """Build the per-phrase refinement prompt.
 
-    The audio is the arbiter. When Parakeet proposed competing readings, they are
-    supplied as a JSON array of per-span options (draft reading first) -- a format
-    the model parses reliably. The model reads the structured grounding but writes
-    back ONE plain corrected line, never JSON.
+    The model hears the audio and sees an automatic transcription. Its task is the
+    best COMPROMISE between four things: faithfulness to the audio, grammatical &
+    syntactic correctness, orthographic correctness, and logical/semantic sense.
+    Any Parakeet n-best readings are offered as purely phonetic hints (sound-alike
+    guesses), never as authoritative text. The model returns ONE plain line.
 
     Every distinct candidate reading is shown per span; the only cap is how many
     hypotheses Parakeet was asked to produce (``nbest``).
@@ -975,28 +976,41 @@ def _build_refiner_prompt(phrase: dict, src_lang_name: str) -> str:
     primary = phrase["text"]
     alts = [a for a in phrase.get("alternatives", []) if a and a.strip() and a.strip() != primary]
 
+    # Lead instruction: the audio is primary, but the written line must also be
+    # grammatically, syntactically, orthographically and semantically correct.
     base = (
-        f"You are an expert native-speaker editor for {src_lang_name}. The draft below is an automatic "
-        f"transcription that may contain misheard words, wrong word boundaries, casual elisions, or missing "
-        f"punctuation and diacritics. Using the audio as evidence, rewrite it as the single line a careful "
-        f"native writer would consider correct: faithful to the audio, grammar, orthography and meaning that makes "
-        f"sense. Never copy a reading that breaks grammar or meaning just because it sounds close.\n\n"
+        f"You are an expert native-speaker transcriber and editor for {src_lang_name}. You are given an "
+        f"audio clip and a rough automatic transcription of it. Produce the single line that best captures "
+        f"what is actually said in the audio, written as correct {src_lang_name}.\n\n"
+        f"Aim for the best balance between FOUR goals, with the audio leading:\n"
+        f"  1. AUDIO: the line must match what you actually hear -- this is the primary anchor.\n"
+        f"  2. GRAMMAR & SYNTAX: it must be a well-formed sentence (correct agreement, case, verb forms, and "
+        f"all words a correct sentence needs -- do not drop required words).\n"
+        f"  3. ORTHOGRAPHY: spell every word correctly with proper diacritics, capitalization and punctuation.\n"
+        f"  4. SEMANTICS: it must make logical sense as a {src_lang_name} sentence.\n\n"
+        f"When these pull against each other, find the reading that honours the audio while still being a "
+        f"correct, sensible {src_lang_name} sentence. Trust your ears over the transcription.\n\n"
     )
 
-    # The real-word + coherence rule is the key guard against adopting an
-    # ASR-coined non-word (e.g. 'Schnupperlang') just because it was acoustically near.
+    # Shared correctness rules, one per dimension. The real-word + semantics rule
+    # is the key guard against adopting a phonetically-close non-word like
+    # 'Schnupperlang'; the syntax rule guards against dropping required words.
     common_rules = (
-        f"- Use only real, correctly spelled {src_lang_name} words (or genuine proper names); never invent a "
-        f"word or nonsense compound. If a span has no good reading, write the correct word you hear.\n"
-        f"- Use standard written forms, not clipped or slurred spellings, even when the singer shortens them.\n"
-        f"- Fix grammar, agreement, word boundaries, capitalization, diacritics and punctuation.\n"
-        f"- Keep numbers as digits (e.g. 99); fix a value only if the audio clearly says a different one.\n"
+        f"- Every word must be a real, correctly spelled {src_lang_name} word (or a genuine proper name), "
+        f"with the right diacritics and capitalization. Never output an invented word or nonsense compound.\n"
+        f"- Use full standard written forms, not clipped or slurred spoken forms, even when the speaker "
+        f"shortens or slurs them.\n"
+        f"- Make the sentence grammatical and complete: fix agreement, case and verb forms, restore word "
+        f"boundaries, and keep every word the sentence needs. Do not delete an audible, required word just "
+        f"because you changed a neighbour.\n"
+        f"- Keep the line semantically coherent; reject any reading that sounds close but makes no sense.\n"
+        f"- Write numbers as digits (e.g. 99); change a value only if the audio clearly says a different one.\n"
         f"- Output one corrected line of {src_lang_name} only -- no quotes, labels, commentary, or translation.\n"
     )
 
     def audio_only() -> str:
         return base + "Rules:\n" + common_rules + (
-            f"\nDraft: {primary}\n\nCorrected line:"
+            f"\nTranscription: {primary}\n\nCorrected line:"
         )
 
     if not alts:
@@ -1007,23 +1021,25 @@ def _build_refiner_prompt(phrase: dict, src_lang_name: str) -> str:
         return audio_only()
 
     return base + (
-        "For the uncertain spans, the recognizer's alternatives are given as JSON below: each entry's "
-        '"options" are competing readings for that span, the first being the draft\'s own reading. '
-        '"(omitted)" means the span may not be present. Treat the options as hints, not a closed list.\n\n'
-        f"Draft: {primary}\n\n"
-        f"Uncertain spans (JSON):\n```json\n{grounding}\n```\n\n"
+        "For the uncertain spots, the speech recognizer's other guesses are listed below as JSON. These are "
+        "PHONETIC HINTS only -- things the recognizer thought the sound might be. They are not authoritative "
+        "and are often wrong; use them only to jog your ear about what the audio could be. Decide each spot "
+        "from the audio and the four goals above, and feel free to write something none of them list.\n\n"
+        f"Transcription: {primary}\n\n"
+        f"Phonetic hints per uncertain spot (JSON):\n```json\n{grounding}\n```\n\n"
         "Rules:\n"
         + common_rules
         + (
-            "- At each span pick the reading that best fits the audio and makes the line correct; if the "
-            "options tie, keep the draft (the first option).\n\n"
-            "Example:\n"
-            '  Draft: There are eight people in the prison sell\n'
-            '  Spans: [{"draft": "eight", "options": ["eight", "ate"]}, '
+            "- At each spot, write what the audio says, rendered as correct {lang}. A hint is worth choosing "
+            "only when it matches the audio AND yields a more correct, sensible line; otherwise ignore the "
+            "hints and write the correct word yourself.\n\n"
+            "Example (the audio decides; hints are just sound-alikes):\n"
+            '  Transcription: There are eight people in the prison sell\n'
+            '  Hints: [{"draft": "eight", "options": ["eight", "ate"]}, '
             '{"draft": "prison sell", "options": ["prison sell", "prison cell", "prisoncell"]}]\n'
             "  Corrected line: There are eight people in the prison cell\n\n"
             "Corrected line:"
-        )
+        ).replace("{lang}", src_lang_name)
     )
 
 
