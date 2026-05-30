@@ -64,12 +64,6 @@ pip install -r requirements.txt
 
 ## 🚀 Usage
 
-# Display help
-
-```
-python transcription.py -h
-```
-
 # Basic Usage (Auto-detects language, translates to English)
 
 ```
@@ -77,6 +71,12 @@ python transcription.py input_track.mp4
 ```
 
 ### Optional Flags
+
+**Display help for all options:**
+
+```
+python transcription.py -h
+```
 
 **Set Target (Translation) Language:**
 
