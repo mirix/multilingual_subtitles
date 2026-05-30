@@ -69,6 +69,16 @@ ASR_SR = 16000             # sample rate expected by Parakeet / the omni refiner
 STFT_NFFT = 2048
 STFT_HOP = 512
 MAX_GAP_SECONDS = 3.5      # silence gap that forces an acoustic phrase break
+# Sentence segmentation (SaT / wtpsplit). The split THRESHOLD is the dominant
+# control: lower => more, shorter sentences. ASR output is unpunctuated and
+# lowercase, which makes SaT conservative at its per-model default (deeper models
+# like sat-12l-sm often return the whole line as ONE sentence on such input), so
+# we set an explicit threshold rather than relying on the default. sat-3l-sm is
+# lighter and splits readily; sat-12l-sm is more accurate but needs the explicit
+# threshold to split unpunctuated lyrics. Override via env or CLI if needed.
+SAT_MODEL = os.environ.get("SAT_MODEL", "sat-12l-sm")
+SAT_THRESHOLD = float(os.environ.get("SAT_THRESHOLD", "0.20"))
+MAX_PHRASE_WORDS = int(os.environ.get("MAX_PHRASE_WORDS", "14"))  # subtitle readability cap
 TRANSLATION_BATCH_SIZE = 40
 PARAKEET_SUBSAMPLING = 8   # Parakeet-TDT time-stride subsampling factor
 REFINER_CONTEXT_PAD = 0.2  # seconds of audio padding around each refined phrase
@@ -153,12 +163,12 @@ _lingua_unavailable = False
 
 
 def get_sat_model():
-    """Lazily load and cache the SaT (Segment any Text) 12-layer model."""
+    """Lazily load and cache the SaT (Segment any Text) segmentation model."""
     global _sat_model
     if _sat_model is None:
-        logger.info("Initializing SaT (Segment any Text) 12-layer model...")
+        logger.info("Initializing SaT (Segment any Text) model: %s", SAT_MODEL)
         from wtpsplit import SaT
-        _sat_model = SaT("sat-12l-sm")
+        _sat_model = SaT(SAT_MODEL)
     return _sat_model
 
 
@@ -557,8 +567,9 @@ def detect_language_acoustic(audio_path: str, words: list | None = None,
 
 
 def segment_words_into_phrases(words: list, max_gap_seconds: float = MAX_GAP_SECONDS) -> list:
-    """Combine acoustic silence detection with SaT-12L semantic segmentation."""
-    logger.info("Applying acoustic + semantic (SaT-12L) segmentation...")
+    """Combine acoustic silence detection with SaT semantic segmentation, then
+    cap any over-long phrase for subtitle readability."""
+    logger.info("Applying acoustic + semantic (SaT) segmentation...")
 
     # 1) Split on long silences.
     acoustic_chunks, current_chunk = [], []
@@ -585,7 +596,11 @@ def segment_words_into_phrases(words: list, max_gap_seconds: float = MAX_GAP_SEC
         if not raw_text.strip():
             continue
 
-        sentences = get_sat_model().split(raw_text)
+        try:
+            sentences = get_sat_model().split(raw_text, threshold=SAT_THRESHOLD)
+        except TypeError:
+            # Older wtpsplit without a `threshold` kwarg.
+            sentences = get_sat_model().split(raw_text)
         word_idx = 0
         curr_search_idx = 0
         for sentence in sentences:
@@ -610,7 +625,14 @@ def segment_words_into_phrases(words: list, max_gap_seconds: float = MAX_GAP_SEC
         remaining = [w_info["word"] for w_info in words_with_spans[word_idx:]]
         if remaining:
             final_phrases.append(_make_phrase(remaining))
-    return final_phrases
+
+    # 3) Safety net: if SaT under-split (common on unpunctuated lyrics), break any
+    #    over-long phrase at its largest internal pauses so subtitle lines stay
+    #    readable regardless of the SaT model/threshold in use.
+    capped = []
+    for ph in final_phrases:
+        capped.extend(_split_overlong_phrase(ph["words"], MAX_PHRASE_WORDS))
+    return capped or final_phrases
 
 
 def _make_phrase(phrase_words: list) -> dict:
@@ -621,6 +643,33 @@ def _make_phrase(phrase_words: list) -> dict:
         "end": phrase_words[-1]["end"],
         "words": phrase_words,
     }
+
+
+def _split_overlong_phrase(words: list, max_words: int = MAX_PHRASE_WORDS) -> list:
+    """Recursively break a phrase that exceeds ``max_words`` at its largest
+    internal pause (the biggest inter-word gap), so over-long lines from a
+    conservative SaT split still become readable subtitle units. Splits near the
+    middle on ties to keep the two halves balanced."""
+    if max_words <= 0 or len(words) <= max_words:
+        return [_make_phrase(words)] if words else []
+
+    best_idx, best_score = None, None
+    n = len(words)
+    for i in range(n - 1):
+        gap = words[i + 1]["start"] - words[i]["end"]
+        # Prefer large gaps; tie-break toward the centre for balance.
+        centrality = -abs((i + 1) - n / 2.0)
+        score = (gap, centrality)
+        if best_score is None or score > best_score:
+            best_score, best_idx = score, i
+
+    left = words[: best_idx + 1]
+    right = words[best_idx + 1:]
+    # Guard against a degenerate split (all gaps equal at the edge).
+    if not left or not right:
+        mid = n // 2
+        left, right = words[:mid], words[mid:]
+    return _split_overlong_phrase(left, max_words) + _split_overlong_phrase(right, max_words)
 
 
 # =====================================================================
@@ -1782,11 +1831,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Do not delete the temporary work directory on exit (useful for "
              "inspecting isolated vocals, the n-best clips, or the generated ASS).",
     )
+    parser.add_argument(
+        "--sat-model", default=SAT_MODEL,
+        help=f"SaT (wtpsplit) sentence-segmentation model (default {SAT_MODEL}). "
+             f"'sat-3l-sm' splits readily; 'sat-12l-sm' is more accurate but more "
+             f"conservative on unpunctuated text.",
+    )
+    parser.add_argument(
+        "--sat-threshold", type=float, default=SAT_THRESHOLD,
+        help=f"SaT split threshold (default {SAT_THRESHOLD}); LOWER = more, shorter "
+             f"sentences. Raise toward 0.5+ for fewer splits.",
+    )
+    parser.add_argument(
+        "--max-phrase-words", type=int, default=MAX_PHRASE_WORDS,
+        help=f"Hard cap on words per subtitle phrase (default {MAX_PHRASE_WORDS}); "
+             f"over-long phrases are split at their largest pauses. 0 disables the cap.",
+    )
     return parser
 
 
 def main(argv: Optional[list] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+
+    # Segmentation knobs are module-level (read inside segment_words_into_phrases);
+    # apply any CLI overrides here before the pipeline runs.
+    global SAT_MODEL, SAT_THRESHOLD, MAX_PHRASE_WORDS
+    SAT_MODEL = args.sat_model
+    SAT_THRESHOLD = args.sat_threshold
+    MAX_PHRASE_WORDS = args.max_phrase_words
+
     try:
         run_pipeline(
             args.video_path,
