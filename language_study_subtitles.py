@@ -74,7 +74,6 @@ PARAKEET_SUBSAMPLING = 8   # Parakeet-TDT time-stride subsampling factor
 REFINER_CONTEXT_PAD = 0.2  # seconds of audio padding around each refined phrase
 CANDIDATE_LID_MIN_WORDS = 3  # below this, text-LID is too noisy to trust; keep candidate
 NBEST_DEFAULT = 3          # Parakeet hypotheses per phrase for grounding (1 disables)
-MAX_CANDIDATES_IN_PROMPT = 4  # cap on alternatives shown to the refiner per phrase
 
 MODEL_BS = "bs_roformer_vocals_resurrection_unwa.ckpt"
 MODEL_MEL = "melband_roformer_big_beta5e.ckpt"
@@ -812,7 +811,7 @@ def _clean_candidate(text: str) -> str:
 
 
 def build_confusion_slots(primary: str, candidates: list,
-                          max_options: int = MAX_CANDIDATES_IN_PROMPT) -> list:
+                          max_options: Optional[int] = None) -> list:
     """Keep the primary draft as an intact backbone and attach word/phrase-level
     alternatives wherever a candidate disagrees.
 
@@ -916,7 +915,8 @@ def build_confusion_slots(primary: str, candidates: list,
                     seen.add(key)
                     alts.append(reading)
 
-            alts = alts[:max_options]
+            if max_options is not None:
+                alts = alts[:max_options]
             if alts or omit:
                 flush()
                 tokens.append(("choice", prim_span, alts, omit))
@@ -944,15 +944,16 @@ def extract_uncertain_spans(tokens: list) -> list:
 
 
 def build_uncertain_json(primary: str, candidates: list,
-                         max_options: int = MAX_CANDIDATES_IN_PROMPT) -> str:
+                         max_options: Optional[int] = None) -> str:
     """Build the JSON grounding payload: an ordered array of uncertain spans,
     each {"draft": <draft text>, "options": [<draft first>, <alternatives>...]}.
 
     An array (not a flat object) keeps order and avoids duplicate-key clobbering
     when the same span occurs twice in a line. The draft reading is always first
-    in ``options`` so 'keep the draft' is an explicit choice. ``max_options`` caps
-    the number of *alternatives* shown per span. Returns '' when nothing is
-    uncertain (the caller then uses the audio-only prompt)."""
+    in ``options`` so 'keep the draft' is an explicit choice. ``max_options`` is
+    optional; when None, every distinct candidate reading at a span is shown (the
+    number of hypotheses, i.e. ``nbest``, already bounds it). Returns '' when
+    nothing is uncertain (the caller then uses the audio-only prompt)."""
     spans = extract_uncertain_spans(build_confusion_slots(primary, candidates, max_options))
     if not spans:
         return ""
@@ -960,91 +961,67 @@ def build_uncertain_json(primary: str, candidates: list,
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _build_refiner_prompt(phrase: dict, src_lang_name: str,
-                          max_options: int = MAX_CANDIDATES_IN_PROMPT) -> str:
+def _build_refiner_prompt(phrase: dict, src_lang_name: str) -> str:
     """Build the per-phrase refinement prompt.
 
     The audio is the arbiter. When Parakeet proposed competing readings, they are
     supplied as a JSON array of per-span options (draft reading first) -- a format
     the model parses reliably. The model reads the structured grounding but writes
     back ONE plain corrected line, never JSON.
+
+    Every distinct candidate reading is shown per span; the only cap is how many
+    hypotheses Parakeet was asked to produce (``nbest``).
     """
     primary = phrase["text"]
-    # Pass ALL stored alternatives through. Diversity is capped per span inside
-    # build_confusion_slots (MAX_CANDIDATES_IN_PROMPT), so clipping whole
-    # sentences here would needlessly starve spans of distinct readings.
     alts = [a for a in phrase.get("alternatives", []) if a and a.strip() and a.strip() != primary]
 
     base = (
-        f"You are an expert native-speaker editor and transcriptionist for {src_lang_name}. "
-        f"The draft below is a strong first hypothesis from an automatic recognizer, but it may contain "
-        f"misheard words, wrong word boundaries, casual spoken elisions, or dropped punctuation and "
-        f"diacritics. Your job is to produce the single best WRITTEN line: the version a careful native "
-        f"writer would consider correct.\n\n"
-        f"Your output must satisfy ALL of these together: (a) it is consistent with what the audio actually "
-        f"says, (b) it is grammatically and syntactically correct {src_lang_name}, and (c) it is "
-        f"semantically coherent -- the sentence makes sense. Use the audio and the listed options as "
-        f"EVIDENCE that narrows the possibilities; do not copy a reading that breaks grammar or meaning just "
-        f"because it is acoustically close.\n\n"
+        f"You are an expert native-speaker editor for {src_lang_name}. The draft below is an automatic "
+        f"transcription that may contain misheard words, wrong word boundaries, casual elisions, or missing "
+        f"punctuation and diacritics. Using the audio as evidence, rewrite it as the single line a careful "
+        f"native writer would consider correct: faithful to the audio, grammar, orthography and meaning that makes "
+        f"sense. Never copy a reading that breaks grammar or meaning just because it sounds close.\n\n"
     )
 
-    # The real-word + coherence constraints are the key guard against adopting an
+    # The real-word + coherence rule is the key guard against adopting an
     # ASR-coined non-word (e.g. 'Schnupperlang') just because it was acoustically near.
     common_rules = (
-        f"- Every word MUST be a real, correctly spelled {src_lang_name} word (or a genuine proper name). "
-        f"NEVER output an invented word or nonsense compound. Discard any option that is not a real word or "
-        f"that makes the sentence incoherent, even if it is the closest acoustic match; if no option works, "
-        f"write the correct standard {src_lang_name} word that fits the audio and the meaning.\n"
-        f"- Prefer the standard written form over a casual or slurred spoken form (e.g. write the full "
-        f"standard word, not a clipped colloquial spelling), even when the singer shortens or slurs it.\n"
-        f"- Fix grammar, case, declension, agreement, word boundaries, capitalization, diacritics and "
-        f"punctuation so the line reads as correct, idiomatic written {src_lang_name}.\n"
-        f"- Write numbers as digits (e.g. 99), never spelled out as words. You may correct a number's value "
-        f"if the audio clearly says a different one, but never replace an already-correct number.\n"
-        f"- Change ONLY what improves correctness. Do NOT delete or replace words that are already correct, "
-        f"and do NOT add words the audio does not support.\n"
-        f"- Be conservative: the draft is the default. Make a change only when audio, grammar and meaning "
-        f"together give you clear reason to. When the draft and an alternative are about equally plausible, "
-        f"keep the draft.\n"
-        f"- Do NOT translate, do NOT paraphrase for style, and do NOT add commentary, labels or quotes.\n"
+        f"- Use only real, correctly spelled {src_lang_name} words (or genuine proper names); never invent a "
+        f"word or nonsense compound. If a span has no good reading, write the correct word you hear.\n"
+        f"- Use standard written forms, not clipped or slurred spellings, even when the singer shortens them.\n"
+        f"- Fix grammar, agreement, word boundaries, capitalization, diacritics and punctuation.\n"
+        f"- Keep numbers as digits (e.g. 99); fix a value only if the audio clearly says a different one.\n"
+        f"- Output one corrected line of {src_lang_name} only -- no quotes, labels, commentary, or translation.\n"
     )
 
     def audio_only() -> str:
-        return base + "RULES:\n" + common_rules + (
-            f"\nDraft: {primary}\n\n"
-            f"Output STRICTLY the single corrected line in {src_lang_name} and nothing else."
+        return base + "Rules:\n" + common_rules + (
+            f"\nDraft: {primary}\n\nCorrected line:"
         )
 
     if not alts:
         return audio_only()
 
-    grounding = build_uncertain_json(primary, alts, max_options)
+    grounding = build_uncertain_json(primary, alts)
     if not grounding:
         return audio_only()
 
     return base + (
-        "Most of the draft is correct. The recognizer was unsure about a few spans, given below as JSON: "
-        'each entry has "draft" (exactly what the draft says there) and "options" (competing readings for '
-        'that span). The FIRST option is always the recognizer\'s main choice (identical to "draft") and is '
-        'your safe default; the rest are alternatives it also considered. "(omitted)" as an option means the '
-        "span may not be present at all. The options are suggestions, not a closed list.\n\n"
+        "For the uncertain spans, the recognizer's alternatives are given as JSON below: each entry's "
+        '"options" are competing readings for that span, the first being the draft\'s own reading. '
+        '"(omitted)" means the span may not be present. Treat the options as hints, not a closed list.\n\n'
         f"Draft: {primary}\n\n"
-        "Uncertain spans (JSON):\n"
-        f"```json\n{grounding}\n```\n\n"
-        "RULES:\n"
+        f"Uncertain spans (JSON):\n```json\n{grounding}\n```\n\n"
+        "Rules:\n"
         + common_rules
         + (
-            f"- At each span, keep the first option (the draft) unless another option is clearly more "
-            f"correct and coherent AND consistent with the audio; if no option works, write the correct "
-            f"standard {src_lang_name} word instead.\n"
-            f"- Reply with ONE corrected line of natural {src_lang_name} only. Do NOT output JSON, keys, "
-            f"brackets, or any explanation.\n\n"
-            "Example input -> output:\n"
+            "- At each span pick the reading that best fits the audio and makes the line correct; if the "
+            "options tie, keep the draft (the first option).\n\n"
+            "Example:\n"
             '  Draft: There are eight people in the prison sell\n'
-            '  Uncertain spans (JSON): [{"draft": "eight", "options": ["eight", "ate"]}, '
+            '  Spans: [{"draft": "eight", "options": ["eight", "ate"]}, '
             '{"draft": "prison sell", "options": ["prison sell", "prison cell", "prisoncell"]}]\n'
             "  Corrected line: There are eight people in the prison cell\n\n"
-            "Now produce the corrected line for the draft above.\n"
             "Corrected line:"
         )
     )
@@ -1113,8 +1090,7 @@ def _clean_refiner_output(text: str) -> str:
 
 def execute_omni_refinement(audio_path: str, phrases: list, model_id: str,
                             src_lang_name: str = "the audio's language",
-                            base_dir: Optional[str] = None,
-                            max_options: int = MAX_CANDIDATES_IN_PROMPT) -> list:
+                            base_dir: Optional[str] = None) -> list:
     """Use an omni-modal LLM (Gemma 4 E2B/E4B) to refine ASR text against the
     actual audio AND the Parakeet n-best candidates carried on each phrase.
 
@@ -1162,7 +1138,7 @@ def execute_omni_refinement(audio_path: str, phrases: list, model_id: str,
             # Write this phrase's slice; the chat template loads audio by path.
             sf.write(clip_path, chunk, sr)
 
-            prompt = _build_refiner_prompt(phrase, src_lang_name, max_options)
+            prompt = _build_refiner_prompt(phrase, src_lang_name)
             # Audio BEFORE text, per the Gemma 4 model card's modality-order note.
             messages = [{
                 "role": "user",
@@ -1561,7 +1537,6 @@ def run_pipeline(
     whisper_lid_model: str = "small",
     nbest: int = NBEST_DEFAULT,
     keep_workspace: bool = False,
-    max_options: int = MAX_CANDIDATES_IN_PROMPT,
 ) -> str:
     """Run the end-to-end subtitle pipeline and return the output video path."""
     check_external_tools()
@@ -1654,7 +1629,7 @@ def run_pipeline(
             logger.info("Phase 2.5: Multimodal refinement with (%s)...", correction_model)
             refined = execute_omni_refinement(
                 v_deecho, phrases, correction_model, src_name,
-                base_dir=base_dir, max_options=max_options,
+                base_dir=base_dir,
             )
 
             logger.info("--- Phase 2.5: audio+candidate correction diff ---")
@@ -1670,7 +1645,7 @@ def run_pipeline(
                     corrections_made += 1
                 # Show the per-span decomposition that actually fed this decision
                 # (this is the JSON grounding the refiner saw, not raw candidates).
-                grounding = build_uncertain_json(orig, phrases[i].get("alternatives", []), max_options)
+                grounding = build_uncertain_json(orig, phrases[i].get("alternatives", []))
                 if grounding:
                     # Always tag with the line number so spans are never mis-read as
                     # belonging to a neighbouring line (esp. when a line was unchanged
@@ -1762,9 +1737,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--nbest", type=int, default=NBEST_DEFAULT,
-        help="Number of Parakeet hypotheses per phrase used as phonetic grounding "
-             "for the refiner (1 disables the second beam pass; refiner then sees "
-             "audio + greedy draft only).",
+        help="Number of Parakeet hypotheses generated per phrase AND the source of "
+             "the per-span options shown to the refiner (1 disables the second beam "
+             "pass; refiner then sees audio + greedy draft only). A span shows every "
+             "distinct reading across these hypotheses, so it never shows more than "
+             "this. If the small model struggles with too many options, lower this.",
     )
     parser.add_argument(
         "--skip-correction", action="store_true",
@@ -1783,14 +1760,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--whisper-lid-model", default="small",
         help="Whisper model size used ONLY for language detection (e.g. base, small, medium).",
-    )
-    parser.add_argument(
-        "--max-options", type=int, default=MAX_CANDIDATES_IN_PROMPT,
-        help=f"Max ALTERNATIVE readings shown per uncertain span in the refiner "
-             f"prompt (default {MAX_CANDIDATES_IN_PROMPT}; the draft is always shown "
-             f"in addition). Separate from --nbest, which controls how many beam "
-             f"hypotheses Parakeet generates. Keep this small (3-5): too many options "
-             f"degrade a small model's choice.",
     )
     parser.add_argument(
         "--keep-workspace", action="store_true",
@@ -1815,7 +1784,6 @@ def main(argv: Optional[list] = None) -> int:
             whisper_lid_model=args.whisper_lid_model,
             nbest=args.nbest,
             keep_workspace=args.keep_workspace,
-            max_options=args.max_options,
         )
     except KeyboardInterrupt:
         logger.warning("Interrupted by user.")
