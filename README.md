@@ -62,7 +62,7 @@ pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
-### 2. The Qwe3-ASR Transcription Environment
+### 3. The Qwe3-ASR Transcription Environment
 Qwen-ASR will soon be supported by transformers and creating a separate environment should no longer be required.
 Do this on a different shell/tab.
 
