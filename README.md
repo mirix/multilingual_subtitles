@@ -77,7 +77,7 @@ pip install -r requirements-qwen.txt
 
 ## 🚀 Usage
 
-# Basic Usage (Auto-detects language, translates to English)
+# Basic Usage (auto-detects language, translates to English)
 
 ```
 python transcription.py input_track.mp4
@@ -97,7 +97,7 @@ python transcription.py -h
 python transcription.py input_track.mp4 --target-lang pt
 ```
 
-**Set Source (Acoustic) Language (Overrides Auto-Detect):**
+**Set Source Audio Language (Overrides Auto-Detect):**
 
 ```
 python transcription.py input_track.mp4 --source-lang de
