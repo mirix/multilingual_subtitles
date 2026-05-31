@@ -1347,7 +1347,7 @@ def segment_aligned_words(aligned_words: list, max_gap_sec: float = 0.6, linger_
         # 3. Punctuation OR Acoustic Gap detected...
         elif has_punctuation or gap >= max_gap_sec:
             # ...BUT only break if we have enough words, OR if it's a huge silence (over 1.5s)
-            if len(current_phrase) >= min_words or gap >= 1.5:
+            if len(current_phrase) >= min_words or gap >= 4.0:
                 should_break = True
                 
         # Commit the phrase
