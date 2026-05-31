@@ -1,0 +1,49 @@
+# =====================================================================
+# Requirements -- QWEN3-ASR SERVER environment
+# =====================================================================
+# This is the SEPARATE env that hosts the Qwen3-ASR HTTP server. The main
+# pipeline (video_subtitle_translate.py) talks to it via the OpenAI-compatible
+# /v1/chat/completions endpoint, so nothing here is imported by that script.
+#
+# Why a separate env: Qwen3-ASR requires an older transformers than the
+# Gemma 4 PR used by the main env. Hosting Qwen behind HTTP keeps the two
+# version graphs apart AND lets the server stay warm across many runs.
+#
+# RECOMMENDED PROCEDURE (one-time):
+#
+#   conda create -n qwen3-asr python=3.12 -y
+#   conda activate qwen3-asr
+#
+#   # 1. Torch matched to your CUDA toolkit:
+#   #    https://pytorch.org/get-started/  (e.g. cu121/cu124 wheels)
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+#   # 2. Flash-attention 2 (recommended; significantly faster Qwen inference):
+#   pip install -U flash-attn --no-build-isolation
+#   # On machines with <96 GB RAM and lots of CPU cores, throttle the build:
+#   #   MAX_JOBS=4 pip install -U flash-attn --no-build-isolation
+#
+#   # 3. The rest:
+#   pip install -r requirements-qwen.txt
+#
+#   # 4. Pre-pull the model so the first request isn't blocked on a 4 GB download:
+#   huggingface-cli download Qwen/Qwen3-ASR-1.7B
+#
+# To launch the server, see QWEN_ASR_SERVER_SETUP.md. The short form is:
+#
+#   qwen-asr-serve Qwen/Qwen3-ASR-1.7B \
+#       --gpu-memory-utilization 0.7 \
+#       --host 127.0.0.1 --port 8000
+
+# ---- The Qwen-ASR package itself ----
+# Use the [vllm] extra for the faster vLLM backend (recommended) -- this is
+# what `qwen-asr-serve` uses under the hood. If your platform can't build
+# vLLM, drop the extra and the server will fall back to the transformers
+# backend (slower, but works).
+qwen-asr[vllm]>=0.1
+
+# ---- Model download CLI ----
+huggingface_hub>=0.23
+
+# ---- Recommended (install separately, see procedure above) ----
+# flash-attn               # significantly faster on Ampere+ GPUs

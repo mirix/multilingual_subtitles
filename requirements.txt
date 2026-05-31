@@ -1,16 +1,74 @@
-librosa
-soundfile
-numpy
-omegaconf
-huggingface_hub
-sentencepiece
-protobuf
-einops
-openai-whisper
-faster-whisper
-lingua-language-detector
-audio-separator[gpu]
-wtpsplit[onnx-gpu]
-nemo_toolkit[asr]
-accelerate
-transformers
+# =====================================================================
+# Requirements -- MAIN environment
+# =====================================================================
+# This is the env that runs video_subtitle_translate.py.
+# It loads: Gemma 4 (refiner), stable-ts (forced alignment), SaT
+# (sentence segmentation), audio-separator (vocal isolation), and the
+# Tencent Hunyuan-MT2 translator.
+#
+# It does NOT load Qwen3-ASR. Qwen runs in a SEPARATE env that serves an
+# OpenAI-compatible HTTP API; this script just sends HTTP requests to it.
+# See QWEN_ASR_SERVER_SETUP.md and requirements-qwen.txt.
+#
+# SYSTEM DEPENDENCIES (not pip-installable):
+#   ffmpeg  (must be on PATH and provide both `ffmpeg` and `ffprobe`)
+#     Linux:   sudo apt install ffmpeg
+#     macOS:   brew install ffmpeg
+#     Windows: choco install ffmpeg
+#
+# GPU + CUDA NOTE:
+#   1. Install torch matched to your CUDA toolkit FIRST from
+#      https://pytorch.org/get-started/  (e.g. cu121/cu124 wheels).
+#   2. THEN install flash-attention (recommended; the script uses it
+#      automatically when present):
+#        pip install -U flash-attn --no-build-isolation
+#      flash-attn 2 needs Ampere+ (RTX 30/40, A100, H100) and torch loaded
+#      in bf16 or fp16 (which this script does).
+#   3. THEN  pip install -r requirements.txt
+#
+# Override the attention backend with USE_FLASH_ATTN=1 (force flash-attn, raise
+# if unavailable) or USE_FLASH_ATTN=0 (force sdpa). Default is 'auto'.
+
+# ---- Core numeric / audio I/O ----
+numpy>=1.24
+librosa>=0.10
+soundfile>=0.12
+
+# ---- Deep-learning runtime ----
+torch>=2.1
+torchvision>=0.16        # required by the Gemma 4 multimodal processor
+
+# ---- Audio source separation (Phase 1) ----
+audio-separator[gpu]>=0.18 ; platform_system != "Darwin"
+audio-separator[cpu]>=0.18 ; platform_system == "Darwin"
+
+# ---- Whisper LID + forced alignment ----
+openai-whisper>=20231117
+faster-whisper>=1.0      # LID fallback if openai-whisper fails
+stable-ts>=2.17          # forced alignment of the refined transcript to audio
+
+# ---- Sentence segmentation (Phase 5) ----
+wtpsplit>=2.0
+
+# ---- Multimodal refiner (Gemma 4 E4B; Phase 4) ----
+# The transformers needed here is the Gemma 4 PR/branch that exposes
+# AutoModelForMultimodalLM and supports apply_chat_template(..., tokenize=True,
+# return_dict=True) with in-message audio. Replace the pin below with whatever
+# PR/commit you installed:
+#   pip install "git+https://github.com/huggingface/transformers.git@<sha-or-branch>"
+#   pip install -U transformers   # once Gemma 4 lands on main
+transformers>=4.57       # minimum
+accelerate>=0.30
+sentencepiece>=0.1.99
+protobuf>=3.20
+huggingface_hub>=0.23
+einops>=0.7
+
+# ---- ASR client (Phase 3) ----
+requests>=2.31           # only thing needed to talk to the Qwen server
+
+# ---- Translator (Phase 6) ----
+# Tencent Hy-MT2-7B uses standard HF causal LM (covered by transformers above).
+
+# ---- Recommended (auto-detected at runtime) ----
+# flash-attn          # installed separately, see GPU note above
