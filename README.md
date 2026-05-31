@@ -1,8 +1,8 @@
-# 🎤 Multilingual Karaoke Subtitle Generator
+# 🎤 Multilingual Subtitle and Traslation Generator
 
-This pipeline generates **word-level karaoke-style subtitles** for videos along with translations into your favourite languages. 
+A tool for language learners. 
 
-It utilizes an "Air-Gapped" architecture, separating the heavy acoustic transcription engine (NVIDIA NeMo Parakeet) from the translation engine (Tencent Hy-MT2) to prevent dependency conflicts and optimize VRAM allocation.
+This pipeline generates **word-level karaoke-style subtitles** for videos, along with translations into your favourite languages.
 
 If you choose a smaller translation model (1.8B vs the current 8B) and deactivate refinement you can run this on a toaster (possibly with as little as 3GB of VRAM).
 
@@ -10,21 +10,22 @@ If you choose a smaller translation model (1.8B vs the current 8B) and deactivat
 
 ## 🌍 Supported Languages
 
-### Acoustic Source Languages (Parakeet TDT v3)
+### Audio Source Languages (Qwen3-ASR-1.7B)
 The pipeline natively aligns audio and generates timestamps for the following 25 languages:
 ```
 INPUT_LANGUAGES = {
-    "en": "English", "es": "Spanish", "fr": "French", "de": "German",
-    "bg": "Bulgarian", "hr": "Croatian", "cs": "Czech", "da": "Danish",
-    "nl": "Dutch", "et": "Estonian", "fi": "Finnish", "el": "Greek",
-    "hu": "Hungarian", "it": "Italian", "lv": "Latvian", "lt": "Lithuanian",
-    "mt": "Maltese", "pl": "Polish", "pt": "Portuguese", "ro": "Romanian",
-    "sk": "Slovak", "sl": "Slovenian", "sv": "Swedish", "ru": "Russian",
-    "uk": "Ukrainian",
+    "zh": "Chinese", "en": "English", "yue": "Cantonese", "ar": "Arabic",
+    "de": "German", "fr": "French", "es": "Spanish", "pt": "Portuguese",
+    "id": "Indonesian", "it": "Italian", "ko": "Korean", "ru": "Russian",
+    "th": "Thai", "vi": "Vietnamese", "ja": "Japanese", "tr": "Turkish",
+    "hi": "Hindi", "ms": "Malay", "nl": "Dutch", "sv": "Swedish",
+    "da": "Danish", "fi": "Finnish", "pl": "Polish", "cs": "Czech",
+    "fil": "Filipino", "fa": "Persian", "el": "Greek", "hu": "Hungarian",
+    "mk": "Macedonian", "ro": "Romanian",
 }
 ```
 
-### Translation Target Languages (Tencent Hy-MT2)
+### Translation Target Languages (Hy-MT2-7B)
 ```
 OUTPUT_LANGUAGES = {
     "zh": "Chinese", "en": "English", "fr": "French", "pt": "Portuguese",
@@ -50,14 +51,26 @@ OUTPUT_LANGUAGES = {
 sudo pacman -Syu ffmpeg libass
 ```
 
-### 2. The Main Pipeline Environment (NeMo / Audio Processing)
-This environment handles vocal isolation, transcription, and subtitle compilation.
+### 2. The Main Pipeline Environment
+This environment handles vocal isolation, transcription, refinement, translation and subtitle compilation.
+This is the environment from were you will run script.
 
 ```
-python3 -m venv venv_main
-source venv_main/bin/activate
+python3 -m venv main-env
+source main-env/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
+```
+
+### 2. The Qwe3-ASR Transcription Environment
+Qwen-ASR will soon be supported by transformers and creating a separate environment should no longer be required.
+Do this on a different shell/tab.
+
+```
+python3 -m venv qwen-env
+source qwen-env/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install -r requirements-qwen.txt
 ```
 
 ---
