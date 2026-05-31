@@ -11,7 +11,7 @@ If you choose a smaller translation model (1.8B vs the current 8B) and deactivat
 ## 🌍 Supported Languages
 
 ### Audio Source Languages (Qwen3-ASR-1.7B)
-The pipeline natively aligns audio and generates timestamps for the following 25 languages:
+The pipeline natively aligns audio and generates timestamps for the following 30 languages:
 ```
 INPUT_LANGUAGES = {
     "zh": "Chinese", "en": "English", "yue": "Cantonese", "ar": "Arabic",
