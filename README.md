@@ -4,7 +4,7 @@ A tool for language learners.
 
 This pipeline generates **word-level karaoke-style subtitles** for videos, along with translations into your favourite languages.
 
-If you choose a smaller translation model (1.8B vs the current 8B) and deactivate refinement you can run this on a toaster (possibly with as little as 4GB of VRAM).
+If you choose a smaller translation model (1.8B vs the current 7B) and deactivate refinement you can run this on a toaster (possibly with as little as 4GB of VRAM).
 
 ---
 
