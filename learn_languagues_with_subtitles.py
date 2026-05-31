@@ -70,7 +70,7 @@ REFINER_CONTEXT_PAD = 0.5  # seconds of audio context around each refined chunk
 # Sentence segmentation
 #SAT_MODEL = os.environ.get("SAT_MODEL", "sat-12l-sm")
 #SAT_THRESHOLD = float(os.environ.get("SAT_THRESHOLD", "0.20"))
-MAX_PHRASE_WORDS = int(os.environ.get("MAX_PHRASE_WORDS", "10"))
+MAX_PHRASE_WORDS = int(os.environ.get("MAX_PHRASE_WORDS", "12"))
 
 # Translation
 TRANSLATION_BATCH_SIZE = 40
@@ -1341,24 +1341,35 @@ def execute_stable_ts_alignment(
         del model
         flush_vram("after stable-ts")
 
-def segment_aligned_words(aligned_words: list, max_gap_sec: float = 0.6, linger_sec: float = 2.0, min_words: int = 3) -> list:
+def segment_aligned_words(aligned_words: list, extreme_gap_sec: float = 2.0, linger_sec: float = 2.0, min_words: int = 3) -> list:
     """
-    Segment the aligned-word stream into subtitle phrases using acoustic gaps.
-    Includes linger time and a min-words safety net to prevent orphaned words.
+    Segment the aligned-word stream into subtitle phrases.
+    Prioritizes grammatical boundaries, using a soft/hard word limit 
+    to prevent orphaned words while keeping lines readable.
     """
     if not aligned_words:
         return []
-    logger.info("Segmenting aligned transcript using acoustic gaps and punctuation...")
+    logger.info("Segmenting aligned transcript using grammar-first logic with soft/hard caps...")
 
     phrases = []
     current_phrase = []
+    
+    # Map the CLI variable to our dual-cap intelligence
+    soft_max_words = MAX_PHRASE_WORDS
+    hard_max_words = MAX_PHRASE_WORDS + 6
 
     for i, word in enumerate(aligned_words):
         current_phrase.append(word)
         should_break = False
         
         text_clean = word["text"].strip()
-        has_punctuation = text_clean.endswith((".", "?", "!", ":", ";", ","))
+        text_exposed = text_clean.rstrip("\"'»”’」』)")
+        has_punctuation = text_exposed.endswith((
+            ".", "?", "!", ":", ";", ",",
+            "。", "，", "、", "？", "！", "；", "：",
+            "؟", "،", "؛",
+            "।", "॥"
+        ))
         
         # Check the acoustic gap to the next word
         if i < len(aligned_words) - 1:
@@ -1367,18 +1378,31 @@ def segment_aligned_words(aligned_words: list, max_gap_sec: float = 0.6, linger_
         else:
             gap = float('inf')  # End of track
             
-        # --- THE SMART BREAK LOGIC ---
-        # 1. Hard cap reached
-        if len(current_phrase) >= MAX_PHRASE_WORDS:
+        # --- THE SOFT/HARD CAP INTELLIGENCE ---
+        
+        # 1. Absolute Hard Cap (Safety limit to prevent massive text overflow)
+        if len(current_phrase) >= hard_max_words:
             should_break = True
+            
         # 2. End of track reached
         elif gap == float('inf'):
             should_break = True
-        # 3. Punctuation OR Acoustic Gap detected...
-        elif has_punctuation or gap >= max_gap_sec:
-            # ...BUT only break if we have enough words, OR if it's a huge silence (over 1.5s)
-            if len(current_phrase) >= min_words or gap >= 4.0:
+            
+        # 3. Punctuation (Logical sentence/clause boundary)
+        elif has_punctuation:
+            if len(current_phrase) >= min_words or gap >= 0.5:
                 should_break = True
+                
+        # 4. Soft Cap Reached (Look for a natural acoustic pause to break)
+        elif len(current_phrase) >= soft_max_words:
+            # We hit the target length. Break ONLY if there is a tiny natural pause (e.g., > 0.15s).
+            # This prevents cutting a fluidly sung phrase like "traurig aus." in half!
+            if gap >= 0.15:
+                should_break = True
+                
+        # 5. Massive Instrumental Break
+        elif gap >= extreme_gap_sec:
+            should_break = True
                 
         # Commit the phrase
         if should_break:
