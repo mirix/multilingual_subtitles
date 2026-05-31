@@ -64,12 +64,12 @@ ASR_SR = 16000             # sample rate fed to Qwen-ASR and Gemma audio
 STFT_NFFT = 2048
 STFT_HOP = 512
 CHUNK_TARGET_SEC = 25.0    # target chunk length; MUST stay <= 30 (Gemma audio max)
-CHUNK_MAX_SEC = 28.0       # hard cap; if a "natural" chunk would exceed this, force split
-REFINER_CONTEXT_PAD = 0.2  # seconds of audio context around each refined chunk
+CHUNK_MAX_SEC = 29.5       # hard cap; if a "natural" chunk would exceed this, force split
+REFINER_CONTEXT_PAD = 0.5  # seconds of audio context around each refined chunk
 
 # Sentence segmentation
-SAT_MODEL = os.environ.get("SAT_MODEL", "sat-12l-sm")
-SAT_THRESHOLD = float(os.environ.get("SAT_THRESHOLD", "0.20"))
+#SAT_MODEL = os.environ.get("SAT_MODEL", "sat-12l-sm")
+#SAT_THRESHOLD = float(os.environ.get("SAT_THRESHOLD", "0.20"))
 MAX_PHRASE_WORDS = int(os.environ.get("MAX_PHRASE_WORDS", "10"))
 
 # Translation
@@ -162,9 +162,9 @@ OUTPUT_LANGUAGES = {
 # =====================================================================
 # LAZY MODEL LOADING
 # =====================================================================
-_sat_model = None
+#_sat_model = None
 
-
+'''
 def get_sat_model():
     """Lazily load and cache the SaT (Segment any Text) segmentation model."""
     global _sat_model
@@ -173,7 +173,7 @@ def get_sat_model():
         from wtpsplit import SaT
         _sat_model = SaT(SAT_MODEL)
     return _sat_model
-
+'''
 
 def lang_name(code: str | None) -> str:
     if not code:
@@ -663,6 +663,38 @@ def extract_vocals_for_pipeline(
 # =====================================================================
 # PHASE 2: ACOUSTIC CHUNKING
 # =====================================================================
+
+def _smart_split_overlong_chunk(y: np.ndarray, sr: int, start_sec: float, end_sec: float, max_sec: float) -> list:
+    """
+    Recursively splits an overlong chunk at the quietest acoustic moment, 
+    rather than making a blind mathematical cut.
+    """
+    if end_sec - start_sec <= max_sec:
+        return [(start_sec, end_sec)]
+
+    # We must cut. Define a search window in the second half of the allowed maximum.
+    # For a 28s max limit, we might search between 15s and 28s for the quietest moment.
+    search_start = start_sec + (max_sec * 0.5)
+    search_end = start_sec + max_sec
+
+    # Extract the search window
+    clip = y[int(search_start * sr) : int(search_end * sr)]
+
+    # Calculate the Root Mean Square (RMS) energy to find the volume envelope
+    rms = librosa.feature.rms(y=clip, frame_length=2048, hop_length=512)[0]
+    
+    # Find the index of the absolute quietest frame in this window
+    min_rms_frame = np.argmin(rms)
+    
+    # Convert that frame index back into actual seconds on our global timeline
+    cut_point_sec = search_start + librosa.frames_to_time(min_rms_frame, sr=sr, hop_length=512)
+
+    # Recursively split the left and right halves
+    left = [(start_sec, cut_point_sec)]
+    right = _smart_split_overlong_chunk(y, sr, cut_point_sec, end_sec, max_sec)
+    
+    return left + right
+
 def generate_audio_chunks(audio_path: str,
                           target_sec: float = CHUNK_TARGET_SEC,
                           max_sec: float = CHUNK_MAX_SEC,
@@ -718,18 +750,20 @@ def generate_audio_chunks(audio_path: str,
 
     # If a chunk somehow exceeded max_sec (continuous singing with no breaks),
     # split it into equal sub-windows.
+    # If a chunk exceeded max_sec, surgically split it at the quietest points.
     safe = []
+    y_dense, sr_dense = librosa.load(audio_path, sr=ASR_SR)
+    
     for s, e in chunks:
         if e - s <= max_sec:
             safe.append((s, e))
         else:
-            n = int(np.ceil((e - s) / target_sec))
-            step = (e - s) / n
-            for i in range(n):
-                safe.append((s + i * step, s + (i + 1) * step))
+            logger.warning("Chunk [%.1fs - %.1fs] exceeds %.1fs limit. Executing energy-aware split...", s, e, max_sec)
+            safe.extend(_smart_split_overlong_chunk(y_dense, sr_dense, s, e, max_sec))
 
     if not safe:
-        safe = _fixed_windows(duration, target_sec)
+        # Ultimate fallback if everything else fails
+        safe = _smart_split_overlong_chunk(y_dense, sr_dense, 0.0, duration, max_sec)
 
     logger.info("Produced %d chunks (duration %.1fs)", len(safe), duration)
     return safe
@@ -815,9 +849,10 @@ def generate_whisper_hints(audio_path: str, chunk_times: list, model_size: str =
             segments, _ = model.transcribe(buf, language=language, beam_size=1, vad_filter=False)
             
             valid_texts = []
+             
             for seg in segments:
-                # The Hallucination/Low-Confidence Guard
-                if seg.avg_logprob < -0.8 or seg.compression_ratio > 2.4 or seg.no_speech_prob > 0.6:
+                # RELAXED Hallucination Guard for Music
+                if seg.avg_logprob < -1.2 or seg.compression_ratio > 2.4 or seg.no_speech_prob > 0.8:
                     logger.warning(
                         "Chunk %d Whisper filter tripped: logprob=%.2f, comp=%.2f, nospeech=%.2f. Dropping: '%s'",
                         i + 1, seg.avg_logprob, seg.compression_ratio, seg.no_speech_prob, seg.text.strip()
@@ -833,11 +868,6 @@ def generate_whisper_hints(audio_path: str, chunk_times: list, model_size: str =
         flush_vram("after Whisper hints")
         logger.info("Whisper hints generated successfully.")
         return hints
-        
-    except Exception as exc:
-        logger.warning("Whisper hint generation failed (%s). Proceeding without hints.", exc)
-        flush_vram("after Whisper hint failure")
-        return [""] * len(chunk_times)
         
     except Exception as exc:
         logger.warning("Whisper hint generation failed (%s). Proceeding without hints.", exc)
@@ -1267,7 +1297,7 @@ def execute_stable_ts_alignment(
                     if not txt:
                         continue
 
-                        # 1. Calculate absolute time in the DENSE timeline
+                    # 1. Calculate absolute time in the DENSE timeline
                     abs_dense_start = start_sec + float(w.start)
                     abs_dense_end = start_sec + float(w.end)
 
@@ -1933,14 +1963,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Do not delete the temporary work directory on exit.",
     )
     parser.add_argument(
-        "--sat-model", default=SAT_MODEL,
-        help=f"SaT (wtpsplit) sentence-segmentation model (default {SAT_MODEL}).",
-    )
-    parser.add_argument(
-        "--sat-threshold", type=float, default=SAT_THRESHOLD,
-        help=f"SaT split threshold (default {SAT_THRESHOLD}); lower => more splits.",
-    )
-    parser.add_argument(
         "--max-phrase-words", type=int, default=MAX_PHRASE_WORDS,
         help=f"Hard cap on words per subtitle phrase (default {MAX_PHRASE_WORDS}).",
     )
@@ -1951,9 +1973,6 @@ def main(argv: Optional[list] = None) -> int:
     args = build_arg_parser().parse_args(argv)
 
     # Segmentation knobs are module-level; apply CLI overrides before the run.
-    global SAT_MODEL, SAT_THRESHOLD, MAX_PHRASE_WORDS
-    SAT_MODEL = args.sat_model
-    SAT_THRESHOLD = args.sat_threshold
     MAX_PHRASE_WORDS = args.max_phrase_words
 
     try:
